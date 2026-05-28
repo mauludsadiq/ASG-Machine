@@ -1,0 +1,43 @@
+import("../src/asg") as asg
+import("../src/projection") as projection
+import("../src/core") as core
+import("std/list") as list
+
+let store = asg.sample_store()
+let p1 = projection.build_projection(store)?
+
+// Rename to same name — no-op mutation
+let store2 = asg.rename_node(store, "fn_main", "main")?
+let p2 = projection.build_projection(store2)?
+
+let a1 = core.assert_equal("rename-to-same text unchanged", p1.text, p2.text)
+// Hash will differ because node version bumped, but text is stable
+let a2 = core.assert_equal("rename-to-same text stable", p2.text == "", false)
+
+// Set property to same value
+let store3 = asg.set_property(store, "stmt_1", "value", "1")?
+let p3 = projection.build_projection(store3)?
+let a3 = core.assert_equal("set-same-value text unchanged", p1.text, p3.text)
+
+// Two independent mutations produce same text if semantically equivalent
+let store4a = asg.set_property(store, "stmt_1", "value", "42")?
+let store4b = asg.set_property(store, "stmt_1", "value", "42")?
+let p4a = projection.build_projection(store4a)?
+let p4b = projection.build_projection(store4b)?
+let a4 = core.assert_equal("equivalent mutations produce same text", p4a.text, p4b.text)
+let a5 = core.assert_equal("equivalent mutations produce same hash", p4a.hash, p4b.hash)
+
+// validate_projection passes on freshly built projection
+let inv = projection.invariant_report(store, p1)
+let a6 = core.assert_equal("invariant ok on fresh projection", inv.ok, true)
+let a7 = core.assert_equal("no missing nodeMap entries", list.len(inv.missingNodeMap), 0)
+let a8 = core.assert_equal("text invariant ok", inv.textOk, true)
+let a9 = core.assert_equal("hash invariant ok", inv.hashOk, true)
+
+// Stale projection fails invariant after mutation
+let store5 = asg.rename_node(store, "stmt_1", "z")?
+let inv2 = projection.invariant_report(store5, p1)
+let a10 = core.assert_equal("stale projection fails invariant", inv2.ok, false)
+let a11 = core.assert_equal("stale projection text mismatch detected", inv2.textOk, false)
+
+core.ok(core.test_summary("projection_stability", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11]))

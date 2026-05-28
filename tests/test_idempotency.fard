@@ -1,0 +1,40 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frame
+import("../src/core") as core
+import("std/list") as list
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let mach = frame.make_machine(rr, 10, 10)
+
+let tx1 = txs.tx("tx_idem", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v2"), 1, "replica_a")
+
+// Send same tx twice in same batch
+let m1 = frame.run_batches(mach, [tx1, tx1])?
+let r1 = list.flat_map(m1.frames, fn(f) { f.transactionResults })
+let statuses1 = list.map(list.filter(r1, fn(r) { r.id == "tx_idem" }), fn(r) { r.status })
+let a1 = core.assert_equal("first occurrence applied", list.get(statuses1, 0), "APPLIED")
+let a2 = core.assert_equal("second occurrence duplicate in same batch", list.get(statuses1, 1), "DUPLICATE")
+
+// Send same tx again in a later batch using the same machine (state threads through)
+// m1 already has tx_idem in processedOps - sending again must be DUPLICATE
+let m2 = frame.run_batches(m1, [tx1])?
+let r2 = list.flat_map(m2.frames, fn(f) { f.transactionResults })
+// r2 only has results from the new batch (opResults reset per batch)
+// find the result for tx_idem in the latest frame
+let latest_frame_results = list.last(m2.frames).transactionResults
+let s2 = list.find(latest_frame_results, fn(r) { r.id == "tx_idem" })
+let a3 = core.assert_equal("same tx duplicate across batches", s2.some.status, "DUPLICATE")
+
+// State should be unchanged after duplicate
+let final_name = asg.get_node(m2.reducer.store, "fn_main").v.name
+let a4 = core.assert_equal("state unchanged after duplicates", final_name, "main_v2")
+
+// Hash should be same as after first application
+let h1 = asg.snapshot_hash(m1.reducer.store)
+let h2 = asg.snapshot_hash(m2.reducer.store)
+let a5 = core.assert_equal("hash stable after duplicate submissions", h1, h2)
+
+core.ok(core.test_summary("idempotency", [a1, a2, a3, a4, a5]))

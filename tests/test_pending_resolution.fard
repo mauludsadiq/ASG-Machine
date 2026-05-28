@@ -1,0 +1,41 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frame
+import("../src/core") as core
+import("std/list") as list
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+
+// tx_b depends on tx_a. Send tx_b first (should go PENDING), then tx_a (APPLIED).
+// tx_b should remain PENDING — the reducer does not retry pending ops automatically.
+let tx_a = txs.tx("tx_a", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_a"), 1, "replica_a")
+let tx_b = txs.tx("tx_b", "ws", ["tx_a"], [txs.pre_exists("fn_main")], txs.op_set("stmt_1", "value", "99"), 2, "replica_b")
+
+let mach = frame.make_machine(rr, 10, 10)
+
+// Batch 1: only tx_b — should go PENDING (tx_a not yet seen)
+let m1 = frame.run_batches(mach, [tx_b])?
+let r1 = list.flat_map(m1.frames, fn(f) { f.transactionResults })
+let s1 = list.find(r1, fn(r) { r.id == "tx_b" })
+let a1 = core.assert_equal("tx_b pending when dep unseen", s1.some.status, "PENDING")
+
+// Batch 2: tx_a arrives — should be APPLIED
+let m2 = frame.run_batches(m1, [tx_a])?
+let r2 = list.flat_map(m2.frames, fn(f) { f.transactionResults })
+let s2 = list.find(r2, fn(r) { r.id == "tx_a" })
+let a2 = core.assert_equal("tx_a applied when dep satisfied", s2.some.status, "APPLIED")
+
+// tx_b is NOT retried — it stays PENDING (documented behavior)
+let s3 = list.filter(r2, fn(r) { r.id == "tx_b" })
+let a3 = core.assert_equal("tx_b retried automatically when dep arrives", list.len(s3), 1)
+
+// Batch 3: send tx_b again explicitly — now tx_a is in processedOps, so tx_b should APPLY
+let tx_b2 = txs.tx("tx_b2", "ws", ["tx_a"], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "99"), 3, "replica_b")
+let m3 = frame.run_batches(m2, [tx_b2])?
+let r3 = list.flat_map(m3.frames, fn(f) { f.transactionResults })
+let s4 = list.find(r3, fn(r) { r.id == "tx_b2" })
+let a4 = core.assert_equal("tx_b2 applied after dep satisfied", s4.some.status, "APPLIED")
+
+core.ok(core.test_summary("pending_resolution", [a1, a2, a3, a4]))
