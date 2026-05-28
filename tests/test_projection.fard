@@ -1,8 +1,83 @@
 import("../src/asg") as asg
 import("../src/projection") as projection
 import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
 
 let store = asg.sample_store()
-let p = projection.build_projection(store)?
-let inv = projection.invariant_report(store, p)
+
+let p1 = projection.build_projection(store)?
+let p2 = projection.build_projection(store)?
+
+let inv = projection.invariant_report(store, p1)
+
 core.assert_equal("projection invariant", inv.ok, true)
+
+core.assert_equal(
+  "deterministic projection hash",
+  p1.hash,
+  p2.hash
+)
+
+core.assert_equal(
+  "deterministic projection text",
+  p1.text,
+  p2.text
+)
+
+let ids = asg.materialized_ids(store)
+
+let missing = list.filter(ids, fn(id) {
+  !rec.has(p1.nodeMap, id)
+})
+
+core.assert_equal(
+  "nodeMap totality",
+  list.len(missing),
+  0
+)
+
+let renamed = asg.rename_node(store, "fn_main", "main2")?
+
+let pm = projection.project_mutation(
+  store,
+  renamed,
+  p1,
+  "fn_main",
+  "ws",
+  "main.fard",
+  "frame_1",
+  1
+)?
+
+core.assert_equal(
+  "diff replaces entire prior text",
+  pm.diff.end,
+  core.text_len(p1.text)
+)
+
+core.assert_equal(
+  "projection mutation text matches rebuilt projection",
+  pm.projection.text,
+  projection.build_projection(renamed)?.text
+)
+
+core.assert_equal(
+  "projection mutation hash matches rebuilt projection",
+  pm.projection.hash,
+  projection.build_projection(renamed)?.hash
+)
+
+core.assert_equal(
+  "rename changed projection text",
+  p1.text == pm.projection.text,
+  false
+)
+
+core.assert_equal(
+  "rename changed projection hash",
+  p1.hash == pm.projection.hash,
+  false
+)
+
+core.ok(true)
