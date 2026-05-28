@@ -96,4 +96,29 @@ fn run_all() {
   { convergence20: c1, convergence40: c2, failures: f }
 }
 
-export { run_all, run_core, run_failure_suite, convergence_check, generate_transactions }
+fn reducer_edge_transactions() {
+  [
+    txs.tx("dup_base", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_dup"), 1, "a"),
+    txs.tx("dup_base", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_dup_again"), 2, "b"),
+    txs.tx("version_mismatch", "ws", [], [txs.pre_version("fn_main", 999)], txs.op_rename("fn_main", "bad_version"), 3, "c"),
+    txs.tx("duplicate_node_add", "ws", [], [txs.pre_exists("fn_main")], txs.op_add("fn_main", asg.make_node("stmt_1", "Expr", "dupe", { text: "dupe" }, []), 1), 4, "d"),
+    txs.tx("move_missing_node", "ws", [], [txs.pre_exists("not_real")], txs.op_move("not_real", "fn_main", 0), 5, "e")
+  ]
+}
+
+fn run_reducer_edge_suite() {
+  let store = asg.sample_store()
+  let rr = reducer.init("ws", "main.fard", store)
+  let result =
+    if core.is_err(rr) then rr else
+      let mach = frame.make_machine(rr.v, 10, 10) in
+      let mr = frame.run_batches(mach, reducer_edge_transactions()) in
+      if core.is_err(mr) then mr else
+        let m = mr.v in
+        let results = list.flat_map(m.frames, fn(f) { f.transactionResults }) in
+        let statuses = list.map(results, fn(r) { { id: r.id, status: r.status, reason: r.reason } }) in
+        core.ok({ statuses: statuses, finalText: m.reducer.projection.text, finalAsgHash: asg.snapshot_hash(m.reducer.store) })
+  result
+}
+
+export { run_all, run_core, run_failure_suite, convergence_check, generate_transactions, run_reducer_edge_suite }

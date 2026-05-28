@@ -1,3 +1,6 @@
 import("../src/harness") as harness
 
-harness.run_all()
+{
+  all: harness.run_all(),
+  reducerEdges: harness.run_reducer_edge_suite()
+}

@@ -1,0 +1,3 @@
+import("../src/harness") as harness
+
+harness.run_reducer_edge_suite()
