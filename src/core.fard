@@ -19,6 +19,34 @@ fn assert_equal(name, a, b) {
   if a == b then { name: name, ok: true } else { name: name, ok: false, expected: b, actual: a }
 }
 
+fn test_pass(name) { { name: name, ok: true } }
+
+fn test_fail(name, expected, actual) {
+  { name: name, ok: false, expected: expected, actual: actual }
+}
+
+fn all_ok(assertions) {
+  list.all(assertions, fn(a) { a.ok })
+}
+
+fn count_passed(assertions) {
+  list.len(list.filter(assertions, fn(a) { a.ok }))
+}
+
+fn count_failed(assertions) {
+  list.len(list.filter(assertions, fn(a) { !a.ok }))
+}
+
+fn test_summary(name, assertions) {
+  {
+    name: name,
+    ok: all_ok(assertions),
+    passed: count_passed(assertions),
+    failed: count_failed(assertions),
+    assertions: assertions
+  }
+}
+
 fn text_len(s) { str.len(s) }
 
 fn stable_json(v) { json.canonicalize(v) }
@@ -67,4 +95,4 @@ fn prefix_sum_lengths(segments, stop_index) {
 
 fn fail_if_err(r) { if is_err(r) then r else ok(r.v) }
 
-export { ok, err, is_ok, is_err, unwrap, require, assert_equal, text_len, stable_json, digest, digest_text, pair_hash, list_hash, has_key, must_get, index_of_id, replace_at, remove_at, insert_at, remove_value, sorted_texts, join_text, prefix_sum_lengths, fail_if_err }
+export { ok, err, is_ok, is_err, unwrap, require, assert_equal, test_pass, test_fail, all_ok, count_passed, count_failed, test_summary, text_len, stable_json, digest, digest_text, pair_hash, list_hash, has_key, must_get, index_of_id, replace_at, remove_at, insert_at, remove_value, sorted_texts, join_text, prefix_sum_lengths, fail_if_err }
