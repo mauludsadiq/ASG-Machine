@@ -1,0 +1,64 @@
+import("../src/asg") as asg
+import("../src/projection") as projection
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+// collect_projection_rec invariant: every materialized ASG node ID
+// must appear exactly once in the nodeMap of a built projection.
+
+let store = asg.sample_store()
+let p = projection.build_projection(store)?
+let ids = asg.materialized_ids(store)
+
+let a1 = core.assert_equal("nodeMap size equals materialized id count", list.len(rec.keys(p.nodeMap)), list.len(ids))
+
+let missing = list.filter(ids, fn(id) { !rec.has(p.nodeMap, id) })
+let a2 = core.assert_equal("no missing ids in nodeMap", list.len(missing), 0)
+
+// Each id maps to a valid projection node id
+let all_valid = list.all(ids, fn(id) {
+  let pid = rec.get(p.nodeMap, id)
+  rec.has(p.nodes, pid)
+})
+let a3 = core.assert_equal("all nodeMap entries point to valid pnodes", all_valid, true)
+
+// deep_store
+let deep = asg.deep_store()
+let pd = projection.build_projection(deep)?
+let deep_ids = asg.materialized_ids(deep)
+let deep_missing = list.filter(deep_ids, fn(id) { !rec.has(pd.nodeMap, id) })
+let a4 = core.assert_equal("deep_store nodeMap complete", list.len(deep_missing), 0)
+let a5 = core.assert_equal("deep_store nodeMap size matches", list.len(rec.keys(pd.nodeMap)), list.len(deep_ids))
+
+// wide_store
+let wide = asg.wide_store()
+let pw = projection.build_projection(wide)?
+let wide_ids = asg.materialized_ids(wide)
+let wide_missing = list.filter(wide_ids, fn(id) { !rec.has(pw.nodeMap, id) })
+let a6 = core.assert_equal("wide_store nodeMap complete", list.len(wide_missing), 0)
+let a7 = core.assert_equal("wide_store nodeMap size matches", list.len(rec.keys(pw.nodeMap)), list.len(wide_ids))
+
+// After mutation nodeMap stays complete
+let renamed = asg.rename_node(store, "fn_main", "main2")?
+let pr = projection.build_projection(renamed)?
+let r_ids = asg.materialized_ids(renamed)
+let r_missing = list.filter(r_ids, fn(id) { !rec.has(pr.nodeMap, id) })
+let a8 = core.assert_equal("nodeMap complete after rename", list.len(r_missing), 0)
+
+// After delete nodeMap reflects removed nodes
+let del = asg.delete_node(store, "stmt_1")?
+let pd2 = projection.build_projection(del)?
+let del_ids = asg.materialized_ids(del)
+let a9 = core.assert_equal("nodeMap shrinks after delete", list.len(rec.keys(pd2.nodeMap)), list.len(del_ids))
+let a10 = core.assert_equal("deleted node absent from nodeMap", rec.has(pd2.nodeMap, "stmt_1"), false)
+
+// After add nodeMap includes new node
+let new_node = asg.make_node("new_x", "Expr", "expr", { text: "x * 2" }, [])
+let added = asg.add_node(store, "fn_main", new_node, 0)?
+let pa = projection.build_projection(added)?
+let add_ids = asg.materialized_ids(added)
+let a11 = core.assert_equal("nodeMap grows after add", list.len(rec.keys(pa.nodeMap)), list.len(add_ids))
+let a12 = core.assert_equal("new node in nodeMap", rec.has(pa.nodeMap, "new_x"), true)
+
+core.ok(core.test_summary("projection_node_count", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12]))

@@ -1,0 +1,18 @@
+import("../src/harness") as harness
+import("../src/core") as core
+
+let c100 = harness.convergence_check(100, 5)
+let cb1  = harness.convergence_check(50, 1)
+
+let assertions = [
+  core.assert_equal("convergence100 ok", c100.v.ok, true),
+  core.assert_equal("convergence100 projection invariant", c100.v.projectionInvariant.ok, true),
+  core.assert_equal("convergence100 frame invariant", c100.v.frameInvariant.ok, true),
+  core.assert_equal("convergence100 replica==server", c100.v.replicaText == c100.v.serverText, true),
+  core.assert_equal("convergenceBatch1 ok", cb1.v.ok, true),
+  core.assert_equal("convergenceBatch1 projection invariant", cb1.v.projectionInvariant.ok, true),
+  core.assert_equal("convergenceBatch1 frame invariant", cb1.v.frameInvariant.ok, true),
+  core.assert_equal("convergenceBatch1 replica==server", cb1.v.replicaText == cb1.v.serverText, true)
+]
+
+core.ok(core.test_summary("stress-convergence", assertions))

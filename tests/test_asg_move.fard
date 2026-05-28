@@ -1,0 +1,55 @@
+import("../src/asg") as asg
+import("../src/projection") as projection
+import("../src/core") as core
+import("std/list") as list
+
+let store = asg.sample_store()
+
+// Cross-parent move: move stmt_1 out of fn_main into... can't, only one function.
+// Use wide_store which has multiple children to test reordering.
+let wide = asg.wide_store()
+
+// Same-parent reorder: move w1 from index 0 to index 4
+let reordered = asg.move_node(wide, "w1", "fn_main", 4)?
+let rc = asg.get_node(reordered, "fn_main").v.children
+let a1 = core.assert_equal("w1 moved to end", list.get(rc, 4), "w1")
+let a2 = core.assert_equal("w2 shifted to front", list.get(rc, 0), "w2")
+let a3 = core.assert_equal("child count unchanged after reorder", list.len(rc), 5)
+
+// Move to index 0
+let to_front = asg.move_node(wide, "w5", "fn_main", 0)?
+let fc = asg.get_node(to_front, "fn_main").v.children
+let a4 = core.assert_equal("w5 moved to index 0", list.get(fc, 0), "w5")
+let a5 = core.assert_equal("w1 still at index 1 after w5 to front", list.get(fc, 1), "w1")
+
+// Cannot move root
+let move_root = asg.move_node(wide, "root", "fn_main", 0)
+let a6 = core.assert_equal("cannot move root", move_root.t, "err")
+let a7 = core.assert_equal("cannot move root error code", move_root.code, "CANNOT_MOVE_ROOT")
+
+// Move after delete: delete w3 then verify projection still valid
+let del = asg.delete_node(wide, "w3")?
+let p_after_del = projection.build_projection(del)?
+let inv = projection.invariant_report(del, p_after_del)
+let a8 = core.assert_equal("projection valid after delete", inv.ok, true)
+let a9 = core.assert_equal("deleted node not in materialized ids", list.len(list.filter(asg.materialized_ids(del), fn(id) { id == "w3" })), 0)
+
+// Move into deep_store: cross-function move
+let deep = asg.deep_store()
+let moved_cross = asg.move_node(deep, "a_let", "fn_b", 0)?
+let fn_a_children = asg.get_node(moved_cross, "fn_a").v.children
+let fn_b_children = asg.get_node(moved_cross, "fn_b").v.children
+let a10 = core.assert_equal("a_let removed from fn_a", list.len(list.filter(fn_a_children, fn(id) { id == "a_let" })), 0)
+let a11 = core.assert_equal("a_let added to fn_b", list.get(fn_b_children, 0), "a_let")
+
+// Projection still valid after cross-function move
+let p_cross = projection.build_projection(moved_cross)?
+let inv_cross = projection.invariant_report(moved_cross, p_cross)
+let a12 = core.assert_equal("projection valid after cross-function move", inv_cross.ok, true)
+
+// Snapshot hash changes after move
+let h_before = asg.snapshot_hash(wide)
+let h_after = asg.snapshot_hash(reordered)
+let a13 = core.assert_equal("hash changes after move", h_before == h_after, false)
+
+core.ok(core.test_summary("asg_move", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13]))

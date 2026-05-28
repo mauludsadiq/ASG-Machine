@@ -10,8 +10,14 @@ let reducerEdges = harness.run_reducer_edge_suite()
 let assertions = [
   core.assert_equal("convergence20 result ok", convergence20.t, "ok"),
   core.assert_equal("convergence20 semantic ok", convergence20.v.ok, true),
+  core.assert_equal("convergence20 projection invariant", convergence20.v.projectionInvariant.ok, true),
+  core.assert_equal("convergence20 frame invariant", convergence20.v.frameInvariant.ok, true),
+  core.assert_equal("convergence20 replica==server", convergence20.v.replicaText == convergence20.v.serverText, true),
   core.assert_equal("convergence40 result ok", convergence40.t, "ok"),
   core.assert_equal("convergence40 semantic ok", convergence40.v.ok, true),
+  core.assert_equal("convergence40 projection invariant", convergence40.v.projectionInvariant.ok, true),
+  core.assert_equal("convergence40 frame invariant", convergence40.v.frameInvariant.ok, true),
+  core.assert_equal("convergence40 replica==server", convergence40.v.replicaText == convergence40.v.serverText, true),
   core.assert_equal("reducer failures result ok", reducerFailures.t, "ok"),
   core.assert_equal("reducer edges result ok", reducerEdges.t, "ok")
 ]
