@@ -55,7 +55,7 @@ The implementation avoids placeholders and stubs: all exported functions perform
 Latest full-system deterministic test receipt:
 
 - Receipt:
-  sha256:84e5ff89ae81197f0e43d8f47976a0c643f450bda9d5f202665bc74160422082
+  sha256:ff99fc11535077a814746aa390e5b33fc69f01d87b9cc347f5309b178f4df928
 
 Verified properties:
 
