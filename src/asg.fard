@@ -183,4 +183,26 @@ fn sample_store() {
   make_store("root", { root: root, fn_main: f, stmt_1: s1, stmt_2: s2 })
 }
 
-export { make_node, make_store, node_exists, get_node, set_node, bump, find_parent, validate_tree_refs, add_node, rename_node, set_property, delete_node, move_node, apply_structural_op, visible_children, materialized_ids, node_signature, snapshot_hash, sample_store }
+
+fn deep_store() {
+  let root = make_node("root", "Module", "module", {}, ["fn_a", "fn_b"])
+  let fa = make_node("fn_a", "Function", "alpha", { returnType: "Int" }, ["a_let", "a_ret"])
+  let fb = make_node("fn_b", "Function", "beta", { returnType: "Bool" }, ["b_ret"])
+  let a_let = make_node("a_let", "Let", "y", { value: "42" }, [])
+  let a_ret = make_node("a_ret", "Return", "return", { value: "y" }, [])
+  let b_ret = make_node("b_ret", "Return", "return", { value: "true" }, [])
+  make_store("root", { root: root, fn_a: fa, fn_b: fb, a_let: a_let, a_ret: a_ret, b_ret: b_ret })
+}
+
+fn wide_store() {
+  let root = make_node("root", "Module", "module", {}, ["fn_main"])
+  let f = make_node("fn_main", "Function", "main", {}, ["w1", "w2", "w3", "w4", "w5"])
+  let w1 = make_node("w1", "Let", "a", { value: "1" }, [])
+  let w2 = make_node("w2", "Let", "b", { value: "2" }, [])
+  let w3 = make_node("w3", "Expr", "expr", { text: "a + b" }, [])
+  let w4 = make_node("w4", "Let", "c", { value: "3" }, [])
+  let w5 = make_node("w5", "Return", "return", { value: "c" }, [])
+  make_store("root", { root: root, fn_main: f, w1: w1, w2: w2, w3: w3, w4: w4, w5: w5 })
+}
+
+export { make_node, make_store, node_exists, get_node, set_node, bump, find_parent, validate_tree_refs, add_node, rename_node, set_property, delete_node, move_node, apply_structural_op, visible_children, materialized_ids, node_signature, snapshot_hash, sample_store, deep_store, wide_store }

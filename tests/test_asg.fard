@@ -1,0 +1,57 @@
+import("../src/asg") as asg
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let store = asg.sample_store()
+
+let a1 = core.assert_equal("root exists", asg.node_exists(store, "root"), true)
+let a2 = core.assert_equal("missing node does not exist", asg.node_exists(store, "not_real"), false)
+
+let rn = asg.rename_node(store, "fn_main", "renamed")?
+let a3 = core.assert_equal("rename changes name", asg.get_node(rn, "fn_main").v.name, "renamed")
+let a4 = core.assert_equal("rename bumps version", asg.get_node(rn, "fn_main").v.version, 1)
+
+let sp = asg.set_property(store, "stmt_1", "value", "99")?
+let a5 = core.assert_equal("set_property updates prop", rec.getOr(asg.get_node(sp, "stmt_1").v.props, "value", ""), "99")
+
+let del = asg.delete_node(store, "stmt_1")?
+let a6 = core.assert_equal("deleted node not visible", asg.node_exists(del, "stmt_1"), false)
+let a7 = core.assert_equal("deleted node not in materialized ids", list.len(list.filter(asg.materialized_ids(del), fn(id) { id == "stmt_1" })), 0)
+
+let new_node = asg.make_node("new_expr", "Expr", "expr", { text: "hello" }, [])
+let added = asg.add_node(store, "fn_main", new_node, 0)?
+let a8 = core.assert_equal("added node exists", asg.node_exists(added, "new_expr"), true)
+let fn_children = asg.get_node(added, "fn_main").v.children
+let a9 = core.assert_equal("added node at index 0", list.get(fn_children, 0), "new_expr")
+
+let dup_add = asg.add_node(store, "fn_main", asg.make_node("stmt_1", "Expr", "dupe", {}, []), 0)
+let a10 = core.assert_equal("duplicate node add fails", dup_add.t, "err")
+let a11 = core.assert_equal("duplicate node add error code", dup_add.code, "NODE_ALREADY_EXISTS")
+
+let moved = asg.move_node(store, "stmt_1", "fn_main", 1)?
+let mc = asg.get_node(moved, "fn_main").v.children
+let a12 = core.assert_equal("moved node at new index", list.get(mc, 1), "stmt_1")
+
+let del_root = asg.delete_node(store, "root")
+let a13 = core.assert_equal("cannot delete root", del_root.t, "err")
+let a14 = core.assert_equal("cannot delete root error code", del_root.code, "CANNOT_DELETE_ROOT")
+
+let ids = asg.materialized_ids(store)
+let a15 = core.assert_equal("materialized ids contains all nodes", list.len(ids), 4)
+
+let h1 = asg.snapshot_hash(store)
+let h2 = asg.snapshot_hash(store)
+let a16 = core.assert_equal("snapshot hash is deterministic", h1, h2)
+
+let store2 = asg.rename_node(store, "fn_main", "other")?
+let h3 = asg.snapshot_hash(store2)
+let a17 = core.assert_equal("snapshot hash changes after mutation", h1 == h3, false)
+
+let deep = asg.deep_store()
+let a18 = core.assert_equal("deep_store has 6 nodes", list.len(asg.materialized_ids(deep)), 6)
+
+let wide = asg.wide_store()
+let a19 = core.assert_equal("wide_store has 7 nodes", list.len(asg.materialized_ids(wide)), 7)
+
+core.ok(core.test_summary("asg", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19]))

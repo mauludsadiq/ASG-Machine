@@ -1,0 +1,32 @@
+import("../src/asg") as asg
+import("../src/projection") as projection
+import("../src/core") as core
+import("std/list") as list
+
+let deep = asg.deep_store()
+let wide = asg.wide_store()
+
+let pd = projection.build_projection(deep)?
+let pw = projection.build_projection(wide)?
+
+let a1 = core.assert_equal("deep store projection ok", projection.invariant_report(deep, pd).ok, true)
+let a2 = core.assert_equal("wide store projection ok", projection.invariant_report(wide, pw).ok, true)
+
+let a3 = core.assert_equal("deep projection contains fn_a", pd.text == pw.text, false)
+
+let del_fa = asg.delete_node(deep, "fn_a")?
+let ids_after = asg.materialized_ids(del_fa)
+let a4 = core.assert_equal("deep delete fn_a removes subtree", list.len(ids_after), 3)
+
+let moved = asg.move_node(wide, "w5", "fn_main", 0)?
+let mc = asg.get_node(moved, "fn_main").v.children
+let a5 = core.assert_equal("wide move w5 to front", list.get(mc, 0), "w5")
+
+let h_deep1 = asg.snapshot_hash(deep)
+let h_deep2 = asg.snapshot_hash(deep)
+let a6 = core.assert_equal("deep store hash deterministic", h_deep1, h_deep2)
+
+let h_wide = asg.snapshot_hash(wide)
+let a7 = core.assert_equal("deep and wide hashes differ", h_deep1 == h_wide, false)
+
+core.ok(core.test_summary("asg_multi_store", [a1, a2, a3, a4, a5, a6, a7]))

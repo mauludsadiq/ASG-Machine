@@ -1,0 +1,44 @@
+import("../src/rope") as rope
+import("../src/core") as core
+import("std/list") as list
+
+let r = rope.from_text("hello world")
+let a1 = core.assert_equal("from_text length", rope.len(r), 11)
+let a2 = core.assert_equal("from_text text", rope.text(r), "hello world")
+
+let replaced = rope.replace_range(r, 0, 5, "p_greeting", "goodbye")?
+let a3 = core.assert_equal("replace_range text", rope.text(replaced), "goodbye world")
+
+let replaced2 = rope.replace_range(r, 6, 11, "p_target", "fard")?
+let a4 = core.assert_equal("replace at end", rope.text(replaced2), "hello fard")
+
+let replaced3 = rope.replace_range(r, 0, 11, "p_all", "replaced")?
+let a5 = core.assert_equal("replace entire text", rope.text(replaced3), "replaced")
+
+let bad = rope.replace_range(r, -1, 5, "p_x", "x")
+let a6 = core.assert_equal("negative start fails", bad.t, "err")
+let a7 = core.assert_equal("negative start error code", bad.code, "INVALID_ROPE_RANGE")
+
+let bad2 = rope.replace_range(r, 5, 3, "p_x", "x")
+let a8 = core.assert_equal("end before start fails", bad2.t, "err")
+
+let bad3 = rope.replace_range(r, 0, 99, "p_x", "x")
+let a9 = core.assert_equal("end beyond length fails", bad3.t, "err")
+
+let seg_rope = rope.from_segments([rope.make_segment("p_a", "foo"), rope.make_segment("p_b", "bar")])
+let a10 = core.assert_equal("from_segments text", rope.text(seg_rope), "foobar")
+let a11 = core.assert_equal("from_segments length", rope.len(seg_rope), 6)
+
+let span = rope.span_of_projection(seg_rope, "p_a")?
+let a12 = core.assert_equal("span start", span.start, 0)
+let a13 = core.assert_equal("span end", span.end, 3)
+
+let span2 = rope.span_of_projection(seg_rope, "p_b")?
+let a14 = core.assert_equal("span2 start", span2.start, 3)
+let a15 = core.assert_equal("span2 end", span2.end, 6)
+
+let missing_span = rope.span_of_projection(seg_rope, "p_missing")
+let a16 = core.assert_equal("missing span fails", missing_span.t, "err")
+let a17 = core.assert_equal("missing span error code", missing_span.code, "PROJECTION_SEGMENT_NOT_FOUND")
+
+core.ok(core.test_summary("rope", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17]))
