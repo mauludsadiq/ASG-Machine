@@ -1,0 +1,186 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+
+fn make_node(id, kind, name, props, children) {
+  { id: id, kind: kind, name: name, props: props, children: children, version: 0, deleted: false }
+}
+
+fn make_store(root_id, nodes) {
+  { root_id: root_id, nodes: nodes, applied_mutations: [] }
+}
+
+fn node_exists(store, node_id) {
+  rec.has(store.nodes, node_id) && rec.get(store.nodes, node_id).deleted == false
+}
+
+fn get_node(store, node_id) {
+  if node_exists(store, node_id) then core.ok(rec.get(store.nodes, node_id)) else core.err("NODE_NOT_FOUND", { node_id: node_id })
+}
+
+fn set_node(store, node) {
+  { ...store, nodes: rec.set(store.nodes, node.id, node) }
+}
+
+fn bump(node) { { ...node, version: node.version + 1 } }
+
+fn parent_of_node_in_list(store, parent_id, target_id) {
+  let p = rec.getOr(store.nodes, parent_id, null)
+  if p == null then null else if list.any(p.children, fn(c) { c == target_id }) then parent_id else null
+}
+
+fn find_parent_scan(store, keys, target_id) {
+  list.fold(keys, null, fn(found, k) {
+    if found != null then found else parent_of_node_in_list(store, k, target_id)
+  })
+}
+
+fn find_parent(store, target_id) {
+  find_parent_scan(store, rec.keys(store.nodes), target_id)
+}
+
+fn replace_child(children, old_id, new_id) {
+  list.map(children, fn(c) { if c == old_id then new_id else c })
+}
+
+fn remove_child(children, child_id) {
+  list.filter(children, fn(c) { c != child_id })
+}
+
+fn add_child_at(children, child_id, idx) {
+  core.insert_at(remove_child(children, child_id), idx, child_id)
+}
+
+fn validate_tree_refs(store) {
+  let keys = rec.keys(store.nodes)
+  let bad = list.flat_map(keys, fn(k) {
+    let n = rec.get(store.nodes, k)
+    list.filter(n.children, fn(c) { !rec.has(store.nodes, c) })
+  })
+  if list.len(bad) == 0 then core.ok(true) else core.err("DANGLING_CHILD_REF", { refs: bad })
+}
+
+fn add_node(store, parent_id, node, index) {
+  let parent_r = get_node(store, parent_id)
+  let result =
+    if core.is_err(parent_r) then parent_r else
+    if rec.has(store.nodes, node.id) then core.err("NODE_ALREADY_EXISTS", { node_id: node.id }) else
+      let parent = parent_r.v in
+      let parent2 = bump({ ...parent, children: add_child_at(parent.children, node.id, index) }) in
+      let store1 = set_node(store, parent2) in
+      let store2 = set_node(store1, node) in
+      core.ok(store2)
+  result
+}
+
+fn rename_node(store, node_id, new_name) {
+  let r = get_node(store, node_id)
+  let result =
+    if core.is_err(r) then r else
+      let node = r.v in
+      let node2 = bump({ ...node, name: new_name }) in
+      core.ok(set_node(store, node2))
+  result
+}
+
+fn set_property(store, node_id, key, value) {
+  let r = get_node(store, node_id)
+  let result =
+    if core.is_err(r) then r else
+      let node = r.v in
+      let props2 = rec.set(node.props, key, value) in
+      core.ok(set_node(store, bump({ ...node, props: props2 })))
+  result
+}
+
+fn delete_node_recursive(store, node_id) {
+  let r = get_node(store, node_id)
+  let result =
+    if core.is_err(r) then r else
+      let node = r.v in
+      let child_deleted = list.fold(node.children, core.ok(store), fn(acc, child_id) {
+        if core.is_err(acc) then acc else delete_node_recursive(acc.v, child_id)
+      }) in
+      if core.is_err(child_deleted) then child_deleted else
+        let store1 = child_deleted.v in
+        let node2 = bump({ ...rec.get(store1.nodes, node_id), deleted: true, children: [] }) in
+        core.ok(set_node(store1, node2))
+  result
+}
+
+fn delete_node(store, node_id) {
+  let result =
+    if node_id == store.root_id then core.err("CANNOT_DELETE_ROOT", { node_id: node_id }) else
+      let parent_id = find_parent(store, node_id) in
+      if parent_id == null then core.err("PARENT_NOT_FOUND", { node_id: node_id }) else
+        let parent = rec.get(store.nodes, parent_id) in
+        let parent2 = bump({ ...parent, children: remove_child(parent.children, node_id) }) in
+        let store1 = set_node(store, parent2) in
+        delete_node_recursive(store1, node_id)
+  result
+}
+
+fn move_node(store, node_id, new_parent_id, new_index) {
+  let result =
+    if node_id == store.root_id then core.err("CANNOT_MOVE_ROOT", { node_id: node_id }) else
+      let node_r = get_node(store, node_id) in
+      let new_parent_r = get_node(store, new_parent_id) in
+      if core.is_err(node_r) then node_r else
+      if core.is_err(new_parent_r) then new_parent_r else
+        let old_parent_id = find_parent(store, node_id) in
+        if old_parent_id == null then core.err("PARENT_NOT_FOUND", { node_id: node_id }) else
+          let old_parent = rec.get(store.nodes, old_parent_id) in
+          let new_parent = rec.get(store.nodes, new_parent_id) in
+          let old_parent2 = bump({ ...old_parent, children: remove_child(old_parent.children, node_id) }) in
+          let store1 = set_node(store, old_parent2) in
+          let new_parent_after = if old_parent_id == new_parent_id then rec.get(store1.nodes, new_parent_id) else new_parent in
+          let new_parent2 = bump({ ...new_parent_after, children: add_child_at(new_parent_after.children, node_id, new_index) }) in
+          core.ok(set_node(store1, new_parent2))
+  result
+}
+
+fn apply_structural_op(store, op) {
+  if op.kind == "RENAME_NODE" then rename_node(store, op.nodeId, op.newName) else
+  if op.kind == "DELETE_NODE" then delete_node(store, op.nodeId) else
+  if op.kind == "MOVE_NODE" then move_node(store, op.nodeId, op.newParentId, op.newIndex) else
+  if op.kind == "SET_PROPERTY" then set_property(store, op.nodeId, op.key, op.value) else
+  if op.kind == "ADD_NODE" then add_node(store, op.parentId, op.node, op.index) else
+  core.err("UNKNOWN_STRUCTURAL_OP", { op: op })
+}
+
+fn visible_children(store, node) {
+  list.filter(node.children, fn(cid) { node_exists(store, cid) })
+}
+
+fn materialized_ids_rec(store, node_id) {
+  let r = get_node(store, node_id)
+  let result =
+    if core.is_err(r) then [] else
+      let n = r.v in
+      let child_ids = list.flat_map(visible_children(store, n), fn(c) { materialized_ids_rec(store, c) }) in
+      list.concat([[node_id], child_ids])
+  result
+}
+
+fn materialized_ids(store) { materialized_ids_rec(store, store.root_id) }
+
+fn node_signature(store, node_id) {
+  let n = get_node(store, node_id).v
+  { id: n.id, kind: n.kind, name: n.name, props: n.props, children: visible_children(store, n), version: n.version, deleted: n.deleted }
+}
+
+fn snapshot_hash(store) {
+  let ids = materialized_ids(store)
+  core.digest(list.map(ids, fn(id) { node_signature(store, id) }))
+}
+
+fn sample_store() {
+  let root = make_node("root", "Module", "module", {}, ["fn_main"])
+  let f = make_node("fn_main", "Function", "main", { returnType: "Int" }, ["stmt_1", "stmt_2"])
+  let s1 = make_node("stmt_1", "Let", "x", { value: "1" }, [])
+  let s2 = make_node("stmt_2", "Return", "return", { value: "x" }, [])
+  make_store("root", { root: root, fn_main: f, stmt_1: s1, stmt_2: s2 })
+}
+
+export { make_node, make_store, node_exists, get_node, set_node, bump, find_parent, validate_tree_refs, add_node, rename_node, set_property, delete_node, move_node, apply_structural_op, visible_children, materialized_ids, node_signature, snapshot_hash, sample_store }

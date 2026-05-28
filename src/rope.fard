@@ -1,0 +1,63 @@
+import("std/list") as list
+import("std/str") as str
+import("./core") as core
+
+fn make_segment(projectionNodeId, text) {
+  { projectionNodeId: projectionNodeId, offsetWithinNode: 0, length: core.text_len(text), text: text }
+}
+
+fn from_segments(segments) { { segments: segments, length: list.fold(segments, 0, fn(acc, s) { acc + s.length }) } }
+fn from_text(text) { from_segments([make_segment("raw", text)]) }
+fn text(rope) { str.concat(list.map(rope.segments, fn(s) { s.text })) }
+fn len(rope) { rope.length }
+
+fn locate_segment(segments, pos) {
+  let n = list.len(segments)
+  let found = list.fold(list.range(0, n), { found: false, index: n, offset: 0, acc: 0 }, fn(st, i) {
+    if st.found then st else
+      let seg = list.get(segments, i) in
+      let next = st.acc + seg.length in
+      if pos <= next then { found: true, index: i, offset: pos - st.acc, acc: next } else { ...st, acc: next }
+  })
+  if found.found then found else { found: true, index: n, offset: 0, acc: found.acc }
+}
+
+fn slice_text(s, start, end) { str.slice(s, start, end) }
+
+fn split_segment(seg, offset) {
+  let left_text = slice_text(seg.text, 0, offset)
+  let right_text = slice_text(seg.text, offset, seg.length)
+  { left: { ...seg, length: core.text_len(left_text), text: left_text }, right: { ...seg, offsetWithinNode: seg.offsetWithinNode + offset, length: core.text_len(right_text), text: right_text } }
+}
+
+fn normalize_segments(segments) {
+  list.filter(segments, fn(s) { s.length > 0 })
+}
+
+fn replace_range(rope, start, end, newProjectionNodeId, newText) {
+  let result =
+    if start < 0 || end < start || end > rope.length then core.err("INVALID_ROPE_RANGE", { start: start, end: end, length: rope.length }) else
+      let all_text = text(rope) in
+      let before = slice_text(all_text, 0, start) in
+      let after = slice_text(all_text, end, rope.length) in
+      let segs = normalize_segments([make_segment("prefix", before), make_segment(newProjectionNodeId, newText), make_segment("suffix", after)]) in
+      core.ok(from_segments(segs))
+  result
+}
+
+fn span_of_projection(rope, projectionNodeId) {
+  let n = list.len(rope.segments)
+  let res = list.fold(list.range(0, n), { found: false, start: 0, end: 0, acc: 0 }, fn(st, i) {
+    let seg = list.get(rope.segments, i)
+    let next = st.acc + seg.length
+    if st.found then { ...st, acc: next } else
+    if seg.projectionNodeId == projectionNodeId then { found: true, start: st.acc, end: next, acc: next } else { ...st, acc: next }
+  })
+  if res.found then core.ok({ start: res.start, end: res.end }) else core.err("PROJECTION_SEGMENT_NOT_FOUND", { projectionNodeId: projectionNodeId })
+}
+
+fn apply_text_diff(rope, diff) {
+  replace_range(rope, diff.start, diff.end, str.concat(["frame:", str.from(diff.frameId)]), diff.newText)
+}
+
+export { make_segment, from_segments, from_text, text, len, locate_segment, replace_range, span_of_projection, apply_text_diff }

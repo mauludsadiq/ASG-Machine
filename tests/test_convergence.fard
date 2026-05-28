@@ -1,0 +1,3 @@
+import("../src/harness") as harness
+
+harness.convergence_check(50, 5)

@@ -1,0 +1,122 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./asg") as asg
+import("./rope") as rope
+
+fn node_projection_id(node_id) { str.concat(["p:", node_id]) }
+
+fn render_leaf(node) {
+  if node.kind == "Module" then "" else
+  if node.kind == "Function" then str.concat(["fn ", node.name, "() {"]) else
+  if node.kind == "Let" then str.concat(["  let ", node.name, " = ", rec.getOr(node.props, "value", "null"), "\n"]) else
+  if node.kind == "Return" then str.concat(["  return ", rec.getOr(node.props, "value", "null"), "\n"]) else
+  if node.kind == "Expr" then str.concat(["  ", rec.getOr(node.props, "text", node.name), "\n"]) else
+  node.name
+}
+
+fn render_close(node) {
+  if node.kind == "Function" then "}\n" else ""
+}
+
+fn combine_text(prefix, child_texts, suffix) {
+  str.concat([prefix, str.concat(child_texts), suffix])
+}
+
+fn project_node(store, node_id) {
+  let nr = asg.get_node(store, node_id)
+  let result =
+    if core.is_err(nr) then core.err("PROJECT_NODE_MISSING", { node_id: node_id }) else
+      let node = nr.v in
+      let child_ids = asg.visible_children(store, node) in
+      let child_results = list.map(child_ids, fn(cid) { project_node(store, cid) }) in
+      let bad = list.find(child_results, fn(r) { core.is_err(r) }) in
+      if rec.has(bad, "some") then bad.some else
+        let children = list.map(child_results, fn(r) { r.v.node }) in
+        let child_texts = list.map(child_results, fn(r) { r.v.text }) in
+        let prefix = render_leaf(node) in
+        let suffix = render_close(node) in
+        let text = combine_text(prefix, child_texts, suffix) in
+        let child_hash_inputs = list.map(children, fn(c) { { hash: c.hash, length: c.length, id: c.id } }) in
+        let h = core.digest({ self: node.id, kind: node.kind, name: node.name, props: node.props, prefix: prefix, suffix: suffix, children: child_hash_inputs }) in
+        let pnode = { id: str.concat(["p_", node.id]), astNodeId: node.id, parentId: null, childIds: list.map(children, fn(c) { c.id }), length: str.len(text), hash: h, cachedText: prefix, text: text } in
+        core.ok({ node: pnode, text: text })
+  result
+}
+
+fn collect_projection_rec(store, node_id) {
+  let r = project_node(store, node_id) in
+  if core.is_err(r) then [] else
+    let pnode = r.v.node in
+    let node = asg.get_node(store, node_id) in
+    if core.is_err(node) then [pnode] else
+      let child_ids = asg.visible_children(store, node.v) in
+      let child_nodes = list.flat_map(child_ids, fn(cid) { collect_projection_rec(store, cid) }) in
+      list.concat([[pnode], child_nodes])
+}
+
+fn build_projection(store) {
+  let r = project_node(store, store.root_id)
+  let result =
+    if core.is_err(r) then r else
+      let nodes = collect_projection_rec(store, store.root_id) in
+      let node_map = list.fold(nodes, {}, fn(acc, pn) { rec.set(acc, pn.astNodeId, pn.id) }) in
+      let pnodes = list.fold(nodes, {}, fn(acc, pn) { rec.set(acc, pn.id, pn) }) in
+      let root_p = r.v.node in
+      let text = r.v.text in
+      let rp = rope.from_segments([rope.make_segment(root_p.id, text)]) in
+      core.ok({ rootId: root_p.id, nodes: pnodes, nodeMap: node_map, text: text, rope: rp, hash: root_p.hash })
+  result
+}
+
+fn materialize_projection(projection) { projection.text }
+
+fn validate_projection(store, projection) {
+  let full = build_projection(store)
+  let result =
+    if core.is_err(full) then full else
+      let p = full.v in
+      if p.text != projection.text then core.err("PROJECTION_TEXT_MISMATCH", { expected: p.text, actual: projection.text }) else
+      if p.hash != projection.hash then core.err("PROJECTION_HASH_MISMATCH", { expected: p.hash, actual: projection.hash }) else
+      core.ok(true)
+  result
+}
+
+fn diff_full(oldProjection, newProjection, workspaceId, fileId, frameId, globalVersion) {
+  {
+    workspaceId: workspaceId,
+    fileId: fileId,
+    globalVersion: globalVersion,
+    frameId: frameId,
+    start: 0,
+    end: core.text_len(oldProjection.text),
+    newText: newProjection.text
+  }
+}
+
+fn project_mutation(oldStore, newStore, oldProjection, targetNodeId, workspaceId, fileId, frameId, globalVersion) {
+  let newp = build_projection(newStore)
+  let result =
+    if core.is_err(newp) then newp else
+      let p2 = newp.v in
+      let diff = diff_full(oldProjection, p2, workspaceId, fileId, frameId, globalVersion) in
+      core.ok({ projection: p2, diff: diff })
+  result
+}
+
+fn invariant_report(store, projection) {
+  let ids = asg.materialized_ids(store)
+  let missing = list.filter(ids, fn(id) { !rec.has(projection.nodeMap, id) })
+  let full = build_projection(store)
+  let text_ok = if core.is_err(full) then false else full.v.text == projection.text
+  let hash_ok = if core.is_err(full) then false else full.v.hash == projection.hash
+  {
+    missingNodeMap: missing,
+    textOk: text_ok,
+    hashOk: hash_ok,
+    ok: list.len(missing) == 0 && text_ok && hash_ok
+  }
+}
+
+export { node_projection_id, render_leaf, render_close, project_node, build_projection, materialize_projection, validate_projection, diff_full, project_mutation, invariant_report }

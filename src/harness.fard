@@ -1,0 +1,99 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./asg") as asg
+import("./projection") as projection
+import("./transactions") as txs
+import("./reducer") as reducer
+import("./frame") as frame
+import("./rope") as rope
+
+fn lcg_next(seed) { (seed * 1103515245 + 12345) % 2147483647 }
+fn pick(seed, n) { lcg_next(seed) % n }
+
+fn make_tx_for_index(i) {
+  if i % 5 == 0 then txs.tx(str.concat(["tx_", str.from(i)]), "ws", [], [txs.pre_exists("fn_main"), txs.pre_kind("fn_main", "Function")], txs.op_rename("fn_main", str.concat(["main_", str.from(i)])), i, "replica_a") else
+  if i % 5 == 1 then txs.tx(str.concat(["tx_", str.from(i)]), "ws", [], [txs.pre_exists("stmt_1"), txs.pre_kind("stmt_1", "Let")], txs.op_set("stmt_1", "value", str.from(i)), i, "replica_b") else
+  if i % 5 == 2 then txs.tx(str.concat(["tx_", str.from(i)]), "ws", [], [txs.pre_exists("stmt_2"), txs.pre_kind("stmt_2", "Return")], txs.op_set("stmt_2", "value", "x"), i, "replica_a") else
+  if i % 5 == 3 then txs.tx(str.concat(["tx_", str.from(i)]), "ws", [], [txs.pre_exists("fn_main")], txs.op_add("fn_main", asg.make_node(str.concat(["expr_", str.from(i)]), "Expr", "expr", { text: str.concat(["x + ", str.from(i)]) }, []), 1), i, "replica_b") else
+  txs.tx(str.concat(["tx_", str.from(i)]), "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main"), i, "replica_a")
+}
+
+fn generate_transactions(count) {
+  list.build(count, fn(i) { make_tx_for_index(i) })
+}
+
+fn invalid_transactions() {
+  [
+    txs.tx("delete_stmt_1", "ws", [], [txs.pre_exists("stmt_1")], txs.op_delete("stmt_1"), 1, "a"),
+    txs.tx("rename_deleted_stmt_1", "ws", ["delete_stmt_1"], [txs.pre_exists("stmt_1")], txs.op_rename("stmt_1", "gone"), 2, "b"),
+    txs.tx("kind_mismatch", "ws", [], [txs.pre_kind("stmt_2", "Function")], txs.op_rename("stmt_2", "bad"), 3, "c"),
+    txs.tx("missing_dep", "ws", ["never_seen"], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "blocked"), 4, "d")
+  ]
+}
+
+fn run_core(count, batchSize) {
+  let store = asg.sample_store()
+  let rr = reducer.init("ws", "main.fard", store)
+  let result =
+    if core.is_err(rr) then rr else
+      let mach = frame.make_machine(rr.v, batchSize, 10) in
+      let txs_list = generate_transactions(count) in
+      let mr = frame.run_batches(mach, txs_list) in
+      if core.is_err(mr) then mr else
+        let m = mr.v in
+        let inv = projection.invariant_report(m.reducer.store, m.reducer.projection) in
+        let seq = frame.verify_frame_sequence(m.frames) in
+        core.ok({ machine: m, projectionInvariant: inv, frameInvariant: seq, finalText: m.reducer.projection.text, finalAsgHash: asg.snapshot_hash(m.reducer.store) })
+  result
+}
+
+fn run_failure_suite() {
+  let store = asg.sample_store()
+  let rr = reducer.init("ws", "main.fard", store)
+  let result =
+    if core.is_err(rr) then rr else
+      let mach = frame.make_machine(rr.v, 4, 10) in
+      let mr = frame.run_batches(mach, invalid_transactions()) in
+      if core.is_err(mr) then mr else
+        let m = mr.v in
+        let results = list.flat_map(m.frames, fn(f) { f.transactionResults }) in
+        let statuses = list.map(results, fn(r) { { id: r.id, status: r.status } }) in
+        core.ok({ statuses: statuses, finalText: m.reducer.projection.text, finalAsgHash: asg.snapshot_hash(m.reducer.store) })
+  result
+}
+
+fn apply_frames_to_replica_text(initialText, frames) {
+  let rp = rope.from_text(initialText)
+  let end = list.fold(frames, core.ok(rp), fn(acc, f) {
+    if core.is_err(acc) then acc else
+    list.fold(f.derivedEffects.projectionDiffs, acc, fn(acc2, d) {
+      if core.is_err(acc2) then acc2 else rope.apply_text_diff(acc2.v, d)
+    })
+  })
+  if core.is_err(end) then end else core.ok(rope.text(end.v))
+}
+
+fn convergence_check(count, batchSize) {
+  let store = asg.sample_store()
+  let initialProjection = projection.build_projection(store)
+  let result =
+    if core.is_err(initialProjection) then initialProjection else
+      let run = run_core(count, batchSize) in
+      if core.is_err(run) then run else
+        let replicaText = apply_frames_to_replica_text(initialProjection.v.text, run.v.machine.frames) in
+        if core.is_err(replicaText) then replicaText else
+          let serverText = run.v.machine.reducer.projection.text in
+          core.ok({ ok: replicaText.v == serverText && run.v.projectionInvariant.ok && run.v.frameInvariant.ok, replicaText: replicaText.v, serverText: serverText, projectionInvariant: run.v.projectionInvariant, frameInvariant: run.v.frameInvariant })
+  result
+}
+
+fn run_all() {
+  let c1 = convergence_check(20, 3)
+  let c2 = convergence_check(40, 7)
+  let f = run_failure_suite()
+  { convergence20: c1, convergence40: c2, failures: f }
+}
+
+export { run_all, run_core, run_failure_suite, convergence_check, generate_transactions }

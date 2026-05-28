@@ -1,0 +1,70 @@
+import("std/str") as str
+import("std/list") as list
+import("std/rec") as rec
+import("std/json") as json
+import("std/hash") as hash
+import("std/type") as type
+
+fn ok(v) { { t: "ok", v: v } }
+fn err(code, data) { { t: "err", code: code, data: data } }
+fn is_ok(r) { type.of(r) == "record" && rec.getOr(r, "t", "") == "ok" }
+fn is_err(r) { type.of(r) == "record" && rec.getOr(r, "t", "") == "err" }
+fn unwrap(r) { if is_ok(r) then r.v else r }
+
+fn require(cond, code, data) {
+  if cond then ok(true) else err(code, data)
+}
+
+fn assert_equal(name, a, b) {
+  if a == b then { name: name, ok: true } else { name: name, ok: false, expected: b, actual: a }
+}
+
+fn text_len(s) { str.len(s) }
+
+fn stable_json(v) { json.canonicalize(v) }
+fn digest(v) { hash.sha256_text(stable_json(v)) }
+fn digest_text(s) { hash.sha256_text(s) }
+
+fn pair_hash(a, b) { digest({ a: a, b: b }) }
+fn list_hash(xs) { digest(xs) }
+
+fn has_key(r, k) { rec.has(r, k) }
+fn must_get(r, k, code) {
+  if rec.has(r, k) then ok(rec.get(r, k)) else err(code, { key: k })
+}
+
+fn index_of_id(xs, id) {
+  list.find_index(xs, fn(x) { x.id == id })
+}
+
+fn replace_at(xs, idx, value) {
+  list.build(list.len(xs), fn(i) { if i == idx then value else list.get(xs, i) })
+}
+
+fn remove_at(xs, idx) {
+  list.filter(list.range(0, list.len(xs)), fn(i) { i != idx })
+  |> list.map(fn(i) { list.get(xs, i) })
+}
+
+fn insert_at(xs, idx, value) {
+  let n = list.len(xs)
+  let left = list.take(xs, idx)
+  let right = list.drop(xs, idx)
+  list.concat([left, [value], right])
+}
+
+fn remove_value(xs, value) {
+  list.filter(xs, fn(x) { x != value })
+}
+
+fn sorted_texts(xs) { list.sort_by(xs, fn(x) { x }) }
+
+fn join_text(xs, sep) { str.join(xs, sep) }
+
+fn prefix_sum_lengths(segments, stop_index) {
+  list.fold(list.range(0, stop_index), 0, fn(acc, i) { acc + list.get(segments, i).length })
+}
+
+fn fail_if_err(r) { if is_err(r) then r else ok(r.v) }
+
+export { ok, err, is_ok, is_err, unwrap, require, assert_equal, text_len, stable_json, digest, digest_text, pair_hash, list_hash, has_key, must_get, index_of_id, replace_at, remove_at, insert_at, remove_value, sorted_texts, join_text, prefix_sum_lengths, fail_if_err }

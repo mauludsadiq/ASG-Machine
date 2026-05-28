@@ -1,0 +1,95 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./asg") as asg
+import("./projection") as projection
+import("./transactions") as txs
+
+fn make_reducer(workspaceId, fileId, store, projectionState) {
+  {
+    workspaceId: workspaceId,
+    fileId: fileId,
+    store: store,
+    projection: projectionState,
+    processedOps: {},
+    failedOps: {},
+    pendingOps: {},
+    globalVersion: 0,
+    opResults: []
+  }
+}
+
+fn init(workspaceId, fileId, store) {
+  let pr = projection.build_projection(store)
+  if core.is_err(pr) then pr else core.ok(make_reducer(workspaceId, fileId, store, pr.v))
+}
+
+fn mark_processed(state, tx, status, reason) {
+  { ...state,
+    processedOps: rec.set(state.processedOps, tx.id, true),
+    opResults: list.concat([state.opResults, [txs.result(tx.id, status, reason)]])
+  }
+}
+
+fn mark_failed(state, tx, reason) {
+  { ...state,
+    processedOps: rec.set(state.processedOps, tx.id, true),
+    failedOps: rec.set(state.failedOps, tx.id, reason),
+    opResults: list.concat([state.opResults, [txs.result(tx.id, "FAILED", reason)]])
+  }
+}
+
+fn mark_pending(state, tx, reason) {
+  { ...state,
+    pendingOps: rec.set(state.pendingOps, tx.id, tx),
+    opResults: list.concat([state.opResults, [txs.result(tx.id, "PENDING", reason)]])
+  }
+}
+
+fn evaluate_transaction(state, tx, frameId) {
+  let result =
+    if rec.has(state.processedOps, tx.id) then
+      core.ok({ state: { ...state, opResults: list.concat([state.opResults, [txs.result(tx.id, "DUPLICATE", "already processed")]]) }, applied: false, diff: null, touchedNodeId: null }) else
+    if !txs.dependencies_satisfied(state.processedOps, tx.dependencies) then
+      let missing = txs.missing_dependencies(state.processedOps, tx.dependencies) in
+      core.ok({ state: mark_pending(state, tx, { missingDependencies: missing }), applied: false, diff: null, touchedNodeId: null }) else
+      let pre = txs.eval_preconditions(state.store, tx.preconditions) in
+      if core.is_err(pre) then
+        core.ok({ state: mark_failed(state, tx, pre), applied: false, diff: null, touchedNodeId: null }) else
+      let oldStore = state.store in
+      let oldProjection = state.projection in
+      let applied = asg.apply_structural_op(oldStore, tx.operation) in
+      if core.is_err(applied) then
+        core.ok({ state: mark_failed(state, tx, applied), applied: false, diff: null, touchedNodeId: null }) else
+      let newStore = applied.v in
+      let touched = rec.getOr(tx.operation, "nodeId", rec.getOr(tx.operation, "parentId", newStore.root_id)) in
+      let nextVersion = state.globalVersion + 1 in
+      let pm = projection.project_mutation(oldStore, newStore, oldProjection, touched, state.workspaceId, state.fileId, frameId, nextVersion) in
+      if core.is_err(pm) then
+        core.ok({ state: mark_failed(state, tx, pm), applied: false, diff: null, touchedNodeId: touched }) else
+      let state2 = {
+        ...state,
+        store: newStore,
+        projection: pm.v.projection,
+        processedOps: rec.set(state.processedOps, tx.id, true),
+        globalVersion: nextVersion,
+        opResults: list.concat([state.opResults, [txs.result(tx.id, "APPLIED", "")]])
+      } in
+      core.ok({ state: state2, applied: true, diff: pm.v.diff, touchedNodeId: touched })
+  result
+}
+
+fn evaluate_batch(state, txs_list, frameId) {
+  list.fold(txs_list, core.ok({ state: { ...state, opResults: [] }, diffs: [], appliedIds: [], touched: [] }), fn(acc, tx) {
+    if core.is_err(acc) then acc else
+    let r = evaluate_transaction(acc.v.state, tx, frameId) in
+    if core.is_err(r) then r else
+    let v = r.v in
+    let diffs2 = if v.applied then list.concat([acc.v.diffs, [v.diff]]) else acc.v.diffs in
+    let app2 = if v.applied then list.concat([acc.v.appliedIds, [tx.id]]) else acc.v.appliedIds in
+    let touch2 = if v.applied then list.concat([acc.v.touched, [v.touchedNodeId]]) else acc.v.touched in
+    core.ok({ state: v.state, diffs: diffs2, appliedIds: app2, touched: touch2 })
+  })
+}
+
+export { make_reducer, init, evaluate_transaction, evaluate_batch }

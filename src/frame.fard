@@ -1,0 +1,67 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./reducer") as reducer
+import("./asg") as asg
+
+fn make_machine(reducerState, batchSize, tickIntervalMs) {
+  { reducer: reducerState, frameId: 0, batchSize: batchSize, tickIntervalMs: tickIntervalMs, frames: [] }
+}
+
+fn frame_hash(frame_without_hash) { core.digest(frame_without_hash) }
+
+fn make_frame(state_before, batch_result, frameId) {
+  let st = batch_result.state
+  let body = {
+    workspaceId: st.workspaceId,
+    frameId: frameId,
+    globalVersion: st.globalVersion,
+    timestampObservedMs: 0,
+    transactionsApplied: batch_result.appliedIds,
+    transactionResults: st.opResults,
+    derivedEffects: {
+      projectionDiffs: batch_result.diffs,
+      invalidatedSymbolScopes: batch_result.touched,
+      diagnosticsInvalidated: list.len(batch_result.touched) > 0,
+      vfsVersion: st.globalVersion
+    }
+  }
+  { ...body, frameHash: frame_hash(body) }
+}
+
+fn tick(machine, txs) {
+  let nextFrameId = machine.frameId + 1
+  let br = reducer.evaluate_batch(machine.reducer, txs, nextFrameId)
+  let result =
+    if core.is_err(br) then br else
+      let frame = make_frame(machine.reducer, br.v, nextFrameId) in
+      let m2 = { ...machine, reducer: br.v.state, frameId: nextFrameId, frames: list.concat([machine.frames, [frame]]) } in
+      core.ok({ machine: m2, frame: frame })
+  result
+}
+
+fn run_batches(machine, txs) {
+  let chunks = list.chunk(txs, machine.batchSize)
+  list.fold(chunks, core.ok(machine), fn(acc, batch) {
+    if core.is_err(acc) then acc else
+    let tr = tick(acc.v, batch) in
+    if core.is_err(tr) then tr else core.ok(tr.v.machine)
+  })
+}
+
+fn replay(initialReducer, frames) {
+  let final_projection_text = if list.len(frames) == 0 then initialReducer.projection.text else list.last(frames).derivedEffects.projectionDiffs
+  core.ok({ frameCount: list.len(frames), finalGlobalVersion: if list.len(frames) == 0 then 0 else list.last(frames).globalVersion, finalFrameHash: if list.len(frames) == 0 then "" else list.last(frames).frameHash })
+}
+
+fn verify_frame_sequence(frames) {
+  let n = list.len(frames)
+  let ids_ok = list.all(list.range(0, n), fn(i) { list.get(frames, i).frameId == i + 1 })
+  let hashes_ok = list.all(frames, fn(f) {
+    let body = rec.remove(f, "frameHash")
+    f.frameHash == frame_hash(body)
+  })
+  { ok: ids_ok && hashes_ok, frameIdsOk: ids_ok, hashesOk: hashes_ok }
+}
+
+export { make_machine, frame_hash, make_frame, tick, run_batches, replay, verify_frame_sequence }

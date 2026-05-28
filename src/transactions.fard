@@ -1,0 +1,50 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./asg") as asg
+
+fn tx(id, workspaceId, dependencies, preconditions, operation, lamportTimestamp, replicaId) {
+  { id: id, workspaceId: workspaceId, dependencies: dependencies, preconditions: preconditions, operation: operation, lamportTimestamp: lamportTimestamp, replicaId: replicaId }
+}
+
+fn pre_exists(nodeId) { { kind: "EXISTS", nodeId: nodeId } }
+fn pre_kind(nodeId, expectedKind) { { kind: "KIND_MATCH", nodeId: nodeId, expectedKind: expectedKind } }
+fn pre_version(nodeId, expectedVersion) { { kind: "VERSION_MATCH", nodeId: nodeId, expectedVersion: expectedVersion } }
+
+fn op_rename(nodeId, newName) { { kind: "RENAME_NODE", nodeId: nodeId, newName: newName } }
+fn op_delete(nodeId) { { kind: "DELETE_NODE", nodeId: nodeId } }
+fn op_move(nodeId, newParentId, newIndex) { { kind: "MOVE_NODE", nodeId: nodeId, newParentId: newParentId, newIndex: newIndex } }
+fn op_set(nodeId, key, value) { { kind: "SET_PROPERTY", nodeId: nodeId, key: key, value: value } }
+fn op_add(parentId, node, index) { { kind: "ADD_NODE", parentId: parentId, node: node, index: index } }
+
+fn eval_precondition(store, p) {
+  if p.kind == "EXISTS" then
+    if asg.node_exists(store, p.nodeId) then core.ok(true) else core.err("PRECONDITION_EXISTS_FAILED", p) else
+  if p.kind == "KIND_MATCH" then
+    let nr = asg.get_node(store, p.nodeId) in
+    if core.is_err(nr) then core.err("PRECONDITION_KIND_NODE_MISSING", p) else
+    if nr.v.kind == p.expectedKind then core.ok(true) else core.err("PRECONDITION_KIND_FAILED", { precondition: p, actualKind: nr.v.kind }) else
+  if p.kind == "VERSION_MATCH" then
+    let nr = asg.get_node(store, p.nodeId) in
+    if core.is_err(nr) then core.err("PRECONDITION_VERSION_NODE_MISSING", p) else
+    if nr.v.version == p.expectedVersion then core.ok(true) else core.err("PRECONDITION_VERSION_FAILED", { precondition: p, actualVersion: nr.v.version }) else
+  core.err("UNKNOWN_PRECONDITION", p)
+}
+
+fn eval_preconditions(store, ps) {
+  list.fold(ps, core.ok(true), fn(acc, p) {
+    if core.is_err(acc) then acc else eval_precondition(store, p)
+  })
+}
+
+fn dependencies_satisfied(processedOps, deps) {
+  list.all(deps, fn(dep) { rec.has(processedOps, dep) })
+}
+
+fn missing_dependencies(processedOps, deps) {
+  list.filter(deps, fn(dep) { !rec.has(processedOps, dep) })
+}
+
+fn result(id, status, reason) { { id: id, status: status, reason: reason } }
+
+export { tx, pre_exists, pre_kind, pre_version, op_rename, op_delete, op_move, op_set, op_add, eval_precondition, eval_preconditions, dependencies_satisfied, missing_dependencies, result }
