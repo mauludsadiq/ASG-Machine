@@ -26,6 +26,7 @@ let summary = core.test_summary("asg-machine-full-suite", assertions)
 
 {
   overallOk: summary.ok,
+  phase: "C",
   summary: summary,
   suites: {
     convergence20: convergence20,

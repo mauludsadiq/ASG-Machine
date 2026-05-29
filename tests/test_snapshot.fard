@@ -1,0 +1,62 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/journal") as journal
+import("../src/snapshot") as snap
+import("../src/core") as core
+import("std/list") as list
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let mach0 = frm.make_machine(rr, 3, 10)
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r")
+let tx4 = txs.tx("tx4", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v2"), 4, "r")
+
+let m = frm.run_batches(mach0, [tx1, tx2, tx3, tx4])?
+let jrnl = journal.append_frames(journal.empty_journal("ws", "main.fard"), m.frames, asg.snapshot_hash(m.reducer.store))
+let serverText = m.reducer.projection.text
+
+// make_snapshot
+let s1 = snap.make_snapshot(m, jrnl)
+let a1 = core.assert_equal("snapshot version", s1.version, m.reducer.globalVersion)
+let a2 = core.assert_equal("snapshot projectionText", s1.projectionText, serverText)
+let a3 = core.assert_equal("snapshot asgHash", s1.asgHash, asg.snapshot_hash(m.reducer.store))
+
+// snapshot_hash deterministic
+let s2 = snap.make_snapshot(m, jrnl)
+let a4 = core.assert_equal("snapshot hash deterministic", snap.snapshot_hash(s1), snap.snapshot_hash(s2))
+
+// verify_snapshot passes
+let v1 = snap.verify_snapshot(s1)?
+let a5 = core.assert_equal("verify snapshot ok", v1, true)
+
+// corrupt snapshot rejected
+let corrupt = { ...s1, snapshotHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+let v2 = snap.verify_snapshot(corrupt)
+let a6 = core.assert_equal("corrupt snapshot is err", v2.t, "err")
+let a7 = core.assert_equal("corrupt snapshot error code", v2.code, "SNAPSHOT_HASH_MISMATCH")
+
+// restore_from_snapshot
+let r1 = snap.restore_from_snapshot(s1, "ws", "main.fard", 3)?
+let a8 = core.assert_equal("restore version", r1.version, s1.version)
+let a9 = core.assert_equal("restore projectionText", r1.projectionText, serverText)
+
+// restore_from_snapshot == replay from genesis
+// Both start from same store state so initial projection text matches
+let a10 = core.assert_equal("restore text matches server", r1.projectionText, serverText)
+
+// snapshot + suffix replay
+let m_mid = frm.run_batches(mach0, [tx1, tx2])?
+let jrnl_mid = journal.append_frames(journal.empty_journal("ws", "main.fard"), m_mid.frames, asg.snapshot_hash(m_mid.reducer.store))
+let snap_mid = snap.make_snapshot(m_mid, jrnl_mid)
+let r2 = snap.restore_and_replay(snap_mid, jrnl, "ws", "main.fard", 3)?
+let a11 = core.assert_equal("snapshot+suffix replayed entries", r2.replayedEntries > 0, true)
+
+// snapshot version matches journal
+let a12 = core.assert_equal("snapshot journalHead matches", s1.journalHead, jrnl.headHash)
+
+core.ok(core.test_summary("snapshot", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12]))

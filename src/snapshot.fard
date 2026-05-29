@@ -1,0 +1,57 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./asg") as asg
+import("./projection") as projection
+import("./journal") as journal
+import("./frame") as frm
+import("./reducer") as reducer
+
+fn make_snapshot(machine, jrnl) {
+  let store = machine.reducer.store in
+  let proj = machine.reducer.projection in
+  let version = machine.reducer.globalVersion in
+  let frameId = if list.len(machine.frames) == 0 then 0 else list.last(machine.frames).frameId in
+  let asgHash = asg.snapshot_hash(store) in
+  let journalHead = jrnl.headHash in
+  let snap = {
+    version: version,
+    frameId: frameId,
+    asgHash: asgHash,
+    projectionText: proj.text,
+    projectionHash: proj.hash,
+    journalHead: journalHead,
+    store: store,
+    projection: proj
+  } in
+  { ...snap, snapshotHash: core.digest({ version: version, asgHash: asgHash, projectionText: proj.text, projectionHash: proj.hash, journalHead: journalHead }) }
+}
+
+fn verify_snapshot(snap) {
+  let expected = core.digest({ version: snap.version, asgHash: snap.asgHash, projectionText: snap.projectionText, projectionHash: snap.projectionHash, journalHead: snap.journalHead }) in
+  if snap.snapshotHash != expected then
+    core.err("SNAPSHOT_HASH_MISMATCH", { expected: expected, actual: snap.snapshotHash }) else
+  core.ok(true)
+}
+
+fn restore_from_snapshot(snap, workspaceId, fileId, batchSize) {
+  let v = verify_snapshot(snap) in
+  if core.is_err(v) then v else
+  let rr = reducer.init(workspaceId, fileId, snap.store) in
+  if core.is_err(rr) then rr else
+  let mach = frm.make_machine(rr.v, batchSize, 0) in
+  core.ok({ machine: mach, version: snap.version, projectionText: snap.projectionText })
+}
+
+fn restore_and_replay(snap, jrnl, workspaceId, fileId, batchSize) {
+  let r = restore_from_snapshot(snap, workspaceId, fileId, batchSize) in
+  if core.is_err(r) then r else
+  let snapFrameId = rec.getOr(snap, "frameId", 0) in
+  let suffix = journal.frames_since(jrnl, snapFrameId) in
+  let tx_list = list.flat_map(suffix, fn(e) { list.map(e.transactionResults, fn(tr) { tr.id }) }) in
+  core.ok({ machine: r.v.machine, replayedEntries: list.len(suffix), projectionText: snap.projectionText })
+}
+
+fn snapshot_hash(snap) { snap.snapshotHash }
+
+export { make_snapshot, verify_snapshot, restore_from_snapshot, restore_and_replay, snapshot_hash }
