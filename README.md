@@ -25,7 +25,8 @@ The ASG Machine produces the correct program. Both ops target stable
 node IDs — not character positions. They are orthogonal. Both apply
 cleanly. Every time. Provably.
 
-    fardrun run --program demo_adversarial.fard --out out/demo
+    # Start the server, then run:
+    ./demo_adversarial.sh
     VERDICT: ASG_WINS
 
 ## How It Works
@@ -46,7 +47,9 @@ provably, not probabilistically.
 
 ## Run the Demo
 
-    fardrun run --program demo_adversarial.fard --out out/demo
+    mkdir -p data/server_audit
+    fardrun run --program server_audited.fard --out out/server_audited
+    ./demo_adversarial.sh   # runs end-to-end through live HTTP server
 
 ## Run the Server
 
@@ -170,11 +173,16 @@ provably, not probabilistically.
 
 ## Proof of Execution
 
-Adversarial demo:
+Adversarial demo (end-to-end through live server):
 
-    fardrun run --program demo_adversarial.fard --out out/demo
-    TEXT CRDT:  return xcounter + 1   <- broken
-    ASG MACHINE: return x             <- correct
+    mkdir -p data/server_audit
+    fardrun run --program server_audited.fard --out out/server_audited
+    ./demo_adversarial.sh
+
+    tx_a ACCEPTED seq:1, tx_b ACCEPTED seq:2
+    frames: 2 head: 2
+    CRDT naive:   fn compute() {  let xcounter + 1= 1  (broken)
+    ASG Machine:  fn compute() {  let x = counter + 1  (correct)
     VERDICT: ASG_WINS
 
 Fast suite:
