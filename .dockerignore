@@ -1,0 +1,4 @@
+out/
+data/
+.git/
+*.tar.gz

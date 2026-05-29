@@ -1,0 +1,17 @@
+services:
+  asg-machine:
+    build: .
+    ports:
+      - "7779:7779"
+    volumes:
+      - asg-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7779/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  asg-data:
