@@ -1,0 +1,69 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./asg") as asg
+import("./runtime") as rt
+import("./request_router") as router
+
+// In-memory workspace manager.
+// Holds multiple runtime instances, routes requests by workspaceId.
+
+fn empty_server(version) {
+  { version: version, workspaces: {}, requestCount: 0 }
+}
+
+fn create_workspace(server, workspaceId, fileId, store) {
+  if rec.has(server.workspaces, workspaceId) then
+    core.err("WORKSPACE_ALREADY_EXISTS", { workspaceId: workspaceId }) else
+  let r = rt.init_runtime(workspaceId, fileId, store) in
+  if core.is_err(r) then r else
+  let ws2 = rec.set(server.workspaces, workspaceId, r.v) in
+  core.ok({ ...server, workspaces: ws2 })
+}
+
+fn get_workspace(server, workspaceId) {
+  let ws = rec.get(server.workspaces, workspaceId) in
+  if ws == null then core.err("WORKSPACE_NOT_FOUND", { workspaceId: workspaceId }) else
+  core.ok(ws)
+}
+
+fn delete_workspace(server, workspaceId) {
+  if !rec.has(server.workspaces, workspaceId) then
+    core.err("WORKSPACE_NOT_FOUND", { workspaceId: workspaceId }) else
+  core.ok({ ...server, workspaces: rec.remove(server.workspaces, workspaceId) })
+}
+
+fn update_workspace(server, workspaceId, newRuntime) {
+  if !rec.has(server.workspaces, workspaceId) then
+    core.err("WORKSPACE_NOT_FOUND", { workspaceId: workspaceId }) else
+  core.ok({ ...server, workspaces: rec.set(server.workspaces, workspaceId, newRuntime) })
+}
+
+fn handle_request(server, method, path, workspaceId, params_or_body) {
+  let srv2 = { ...server, requestCount: server.requestCount + 1 } in
+  if method == "GET" && path == "/health" then
+    let r = router.handle_get_health(
+      if rec.has(server.workspaces, workspaceId) then rec.get(server.workspaces, workspaceId)
+      else { workspaceId: workspaceId, consumer: { machine: { frames: [], reducer: { globalVersion: 0, projection: { text: "" } } }, journal: { entries: [], headHash: "" } } },
+      server.version
+    ) in
+    if core.is_err(r) then r else
+    core.ok({ server: srv2, response: r.v }) else
+  let ws = rec.get(server.workspaces, workspaceId) in
+  if ws == null then
+    core.ok({ server: srv2, response: { httpStatus: 404, body: { error: "WORKSPACE_NOT_FOUND", workspaceId: workspaceId } } }) else
+  let r = router.dispatch_request(ws, method, path, params_or_body, server.version) in
+  if core.is_err(r) then r else
+  let resp = r.v in
+  let srv3 = if rec.has(resp, "runtime") then
+    { ...srv2, workspaces: rec.set(srv2.workspaces, workspaceId, resp.runtime) } else srv2 in
+  core.ok({ server: srv3, response: { httpStatus: resp.httpStatus, body: resp.body } })
+}
+
+fn workspace_count(server) { list.len(rec.keys(server.workspaces)) }
+
+fn server_hash(server) {
+  core.digest({ version: server.version, workspaceCount: workspace_count(server), requestCount: server.requestCount })
+}
+
+export { empty_server, create_workspace, get_workspace, delete_workspace, update_workspace, handle_request, workspace_count, server_hash }

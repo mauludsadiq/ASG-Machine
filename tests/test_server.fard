@@ -1,0 +1,91 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/runtime") as rt
+import("../src/server") as server
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let store = asg.sample_store()
+let srv0 = server.empty_server("0.5.0")
+
+let tx1 = txs.tx("tx1", "ws_a", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws_a", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx_b = txs.tx("tx_b1", "ws_b", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_b"), 1, "r")
+
+// empty server
+let a1 = core.assert_equal("empty server version", srv0.version, "0.5.0")
+let a2 = core.assert_equal("empty server workspace count", server.workspace_count(srv0), 0)
+
+// create workspace
+let srv1 = server.create_workspace(srv0, "ws_a", "a.fard", store)?
+let a3 = core.assert_equal("workspace count after create", server.workspace_count(srv1), 1)
+
+// duplicate workspace rejected
+let dup = server.create_workspace(srv1, "ws_a", "a.fard", store)
+let a4 = core.assert_equal("duplicate workspace is err", dup.t, "err")
+let a5 = core.assert_equal("duplicate workspace code", dup.code, "WORKSPACE_ALREADY_EXISTS")
+
+// get_workspace
+let ws_a = server.get_workspace(srv1, "ws_a")?
+let a6 = core.assert_equal("get workspace workspaceId", ws_a.workspaceId, "ws_a")
+
+// get missing workspace
+let bad_ws = server.get_workspace(srv1, "ws_missing")
+let a7 = core.assert_equal("missing workspace is err", bad_ws.t, "err")
+let a8 = core.assert_equal("missing workspace code", bad_ws.code, "WORKSPACE_NOT_FOUND")
+
+// handle_request POST /tx
+let body1 = { id: "tx1", workspaceId: "ws_a", dependencies: [], preconditions: [], operation: txs.op_rename("fn_main", "main_v1"), lamportTimestamp: 1, replicaId: "r" }
+let r1 = server.handle_request(srv1, "POST", "/tx", "ws_a", body1)?
+let a9 = core.assert_equal("handle POST /tx 201", r1.response.httpStatus, 201)
+let a10 = core.assert_equal("handle POST /tx requestCount", r1.server.requestCount, 1)
+
+// runtime updated in server after submit
+let ws_a2 = server.get_workspace(r1.server, "ws_a")?
+let a11 = core.assert_equal("runtime updated after submit", rt.server_text(ws_a2) == rt.server_text(ws_a), false)
+
+// handle_request GET /frames
+let r2 = server.handle_request(r1.server, "GET", "/frames", "ws_a", { workspaceId: "ws_a", since: 0 })?
+let a12 = core.assert_equal("handle GET /frames 200", r2.response.httpStatus, 200)
+let a13 = core.assert_equal("frames count > 0", r2.response.body.count > 0, true)
+
+// handle_request GET /snapshot
+let r3 = server.handle_request(r1.server, "GET", "/snapshot", "ws_a", { workspaceId: "ws_a" })?
+let a14 = core.assert_equal("handle GET /snapshot 200", r3.response.httpStatus, 200)
+
+// handle_request GET /health
+let r4 = server.handle_request(r1.server, "GET", "/health", "ws_a", {})?
+let a15 = core.assert_equal("handle GET /health 200", r4.response.httpStatus, 200)
+let a16 = core.assert_equal("health version", r4.response.body.version, "0.5.0")
+
+// handle_request unknown workspace -> 404
+let r5 = server.handle_request(srv1, "POST", "/tx", "ws_missing", body1)?
+let a17 = core.assert_equal("unknown workspace 404", r5.response.httpStatus, 404)
+
+// handle_request unknown route -> 404
+let r6 = server.handle_request(srv1, "DELETE", "/tx", "ws_a", {})?
+let a18 = core.assert_equal("unknown route 404", r6.response.httpStatus, 404)
+
+// multi-workspace isolation
+let srv2 = server.create_workspace(r1.server, "ws_b", "b.fard", store)?
+let body_b = { id: "tx_b1", workspaceId: "ws_b", dependencies: [], preconditions: [], operation: txs.op_rename("fn_main", "main_b"), lamportTimestamp: 1, replicaId: "r" }
+let r7 = server.handle_request(srv2, "POST", "/tx", "ws_b", body_b)?
+let ws_a3 = server.get_workspace(r7.server, "ws_a")?
+let ws_b3 = server.get_workspace(r7.server, "ws_b")?
+let a19 = core.assert_equal("ws_a and ws_b isolated", rt.server_text(ws_a3) == rt.server_text(ws_b3), false)
+
+// delete workspace
+let srv3 = server.delete_workspace(r1.server, "ws_a")?
+let a20 = core.assert_equal("workspace count after delete", server.workspace_count(srv3), 0)
+
+// delete missing workspace
+let bad_del = server.delete_workspace(srv0, "ws_a")
+let a21 = core.assert_equal("delete missing is err", bad_del.t, "err")
+
+// server_hash deterministic
+let h1 = server.server_hash(r1.server)
+let h2 = server.server_hash(r1.server)
+let a22 = core.assert_equal("server_hash deterministic", h1, h2)
+
+core.ok(core.test_summary("server", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22]))
