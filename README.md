@@ -41,6 +41,10 @@ cryptographic receipt tying inputs to outputs.
     src/reducer.fard                 deterministic reducer
     src/frame.fard                   batch frame machine and replay
     src/editor_bridge.fard           deterministic client-side frame replay
+    src/journal.fard                 deterministic replay journal with hash chaining
+    src/recovery.fard                client catch-up from arbitrary version
+    src/vfs.fard                     versioned document snapshots
+    src/lsp_bridge.fard              LSP mirror with deterministic diagnostics
     src/harness.fard                 deterministic convergence harness
     main.fard                        executable demo summary
     tests/*.fard                     executable test programs
@@ -58,10 +62,8 @@ cryptographic receipt tying inputs to outputs.
 
 ## Scale
 
-    1,743 lines of FARD across 29 files
-    864 lines source (10 modules)
-    876 lines tests (19 test programs)
-    185+ invariant assertions
+    2,390 lines of FARD across 38 files
+    261 invariant assertions
     0 failures
 
 ## Test Suite
@@ -82,6 +84,11 @@ cryptographic receipt tying inputs to outputs.
 | test_convergence.fard | 10 | 50-tx convergence, all invariants hard-asserted |
 | test_replay.fard | 10 | empty/single/multi frame replay, text and hash |
 | test_editor_bridge.fard | 17 | single/multi frame apply, stale/gap rejection, determinism |
+| test_journal.fard | 20 | append, chain integrity, corruption detection, replay |
+| test_recovery.fard | 15 | catch-up replay, stale rejection, determinism |
+| test_multi_client_convergence.fard | 16 | 5 clients, duplicate/partial/reconnect scenarios |
+| test_vfs.fard | 13 | snapshots, frame apply, journal sync, hash determinism |
+| test_lsp_bridge.fard | 12 | open/sync/close, diagnostics, unopened rejection |
 | test_reducer_failure.fard | - | failure suite via harness |
 | test_reducer_edges.fard | - | edge cases via harness |
 | run_all.fard | 12 | fast full suite with hard invariant assertions |
@@ -121,6 +128,18 @@ and emits a diff covering only that span. Falls back to full-document replacemen
 when the target node is deleted or not found in the new projection.
 Unchanged subtree hashes are preserved across mutations.
 
+**Replay journal:**
+
+Each journal entry chains prevFrameHash -> frameHash. verify_chain() detects
+broken sequences, broken hash links, and headHash mismatches. replay_journal()
+reconstructs final text from journal entries alone — no snapshots required.
+
+**Client recovery:**
+
+recovery_state() computes missing frames for any client version. replay_since()
+applies them deterministically via the editor bridge. check_recovery_valid()
+rejects clients claiming a version ahead of the server.
+
 **validate_projection error paths:**
 
 - PROJECTION_TEXT_MISMATCH: projection text does not match a full rebuild.
@@ -149,6 +168,11 @@ Verified properties:
 - Editor bridge replay determinism: PASS
 - Incremental projection minimal diffs: PASS
 - Incremental projection hash preservation: PASS
+- Journal chain integrity and corruption detection: PASS
+- Client recovery from arbitrary version: PASS
+- 5-client convergence simulation: PASS
+- VFS document sync determinism: PASS
+- LSP mirror sync and diagnostics: PASS
 
 Stress suite (separate, ~80s):
 
