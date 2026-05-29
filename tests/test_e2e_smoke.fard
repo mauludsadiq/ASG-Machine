@@ -1,0 +1,112 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/server") as server
+import("../src/cli_driver") as cli
+import("../src/editor_bridge") as bridge
+import("../src/editor_adapter") as adapter
+import("../src/ws_stream") as ws
+import("../src/recovery") as recovery
+import("../src/runtime") as rt
+import("../src/snapshot") as snap
+import("../src/journal") as journal
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+// E.4-E.7 integration smoke test
+// Full path: CLI parse -> server POST /tx -> GET /frames -> client replay -> GET /snapshot
+
+// Boot server with one workspace
+let store = asg.sample_store()
+let srv = server.create_workspace(server.empty_server("0.5.0"), "ws", "main.fard", store)?
+let initialText = rt.server_text(server.get_workspace(srv, "ws")?)
+
+// E.4 — Submit txs via CLI -> server POST /tx
+let cli1 = cli.run_cli(["submit", "--workspace=ws", "--id=tx1", "--op=rename", "--node=fn_main", "--value=main_v1"])?
+let cli2 = cli.run_cli(["submit", "--workspace=ws", "--id=tx2", "--op=set", "--node=stmt_1", "--key=value", "--value=42"])?
+let cli3 = cli.run_cli(["submit", "--workspace=ws", "--id=tx3", "--op=set", "--node=stmt_2", "--key=value", "--value=z"])?
+
+fn to_body(submitted) {
+  { id: submitted.id, workspaceId: submitted.workspaceId, dependencies: submitted.dependencies, preconditions: submitted.preconditions, operation: submitted.operation, lamportTimestamp: submitted.lamportTimestamp, replicaId: submitted.replicaId }
+}
+
+let r1 = server.handle_request(srv, "POST", "/tx", "ws", to_body(cli1.submitted))?
+let r2 = server.handle_request(r1.server, "POST", "/tx", "ws", to_body(cli2.submitted))?
+let r3 = server.handle_request(r2.server, "POST", "/tx", "ws", to_body(cli3.submitted))?
+let srv3 = r3.server
+
+let a1 = core.assert_equal("tx1 submitted 201", r1.response.httpStatus, 201)
+let a2 = core.assert_equal("tx2 submitted 201", r2.response.httpStatus, 201)
+let a3 = core.assert_equal("tx3 submitted 201", r3.response.httpStatus, 201)
+
+// E.4 — Duplicate submit returns 200
+let r_dup = server.handle_request(srv3, "POST", "/tx", "ws", to_body(cli1.submitted))?
+let a4 = core.assert_equal("duplicate submit 200", r_dup.response.httpStatus, 200)
+let a5 = core.assert_equal("duplicate body DUPLICATE", r_dup.response.body.status, "DUPLICATE")
+
+// E.5 — GET /frames returns all frames
+let rf = server.handle_request(srv3, "GET", "/frames", "ws", { workspaceId: "ws", since: 0 })?
+let a6 = core.assert_equal("GET /frames 200", rf.response.httpStatus, 200)
+let a7 = core.assert_equal("frames count > 0", rf.response.body.count > 0, true)
+let headFrameId = rf.response.body.headFrameId
+let a8 = core.assert_equal("headFrameId > 0", headFrameId > 0, true)
+
+// E.5 — GET /frames since head returns empty
+let rf2 = server.handle_request(srv3, "GET", "/frames", "ws", { workspaceId: "ws", since: headFrameId })?
+let a9 = core.assert_equal("GET /frames since head empty", rf2.response.body.count, 0)
+
+// E.5 — Client replays frames from journal entries
+let ws_rt = server.get_workspace(srv3, "ws")?
+let serverText = rt.server_text(ws_rt)
+let client = bridge.init("ws", "main.fard", initialText)?
+let jrnl = ws_rt.consumer.journal
+let caught_up = recovery.replay_since(client, jrnl, 0)?
+let a10 = core.assert_equal("client replay text matches server", caught_up.text, serverText)
+let a11 = core.assert_equal("client replay version matches", caught_up.globalVersion, headFrameId)
+
+// E.5 — Editor adapter applies frame msgs
+let editor_doc = adapter.make_editor_doc("main.fard", initialText)
+let journal_entries = journal.frames_since(jrnl, 0)
+let frame_msgs = list.flat_map(journal_entries, fn(e) {
+  list.map(e.projectionDiffs, fn(d) { d })
+})
+let final_doc = list.fold(frame_msgs, core.ok(editor_doc), fn(acc, diff) {
+  if core.is_err(acc) then acc else adapter.apply_diff_to_doc(acc.v, diff)
+})?
+let a12 = core.assert_equal("editor doc text matches server", final_doc.text, serverText)
+let a13 = core.assert_equal("editor doc synced", final_doc.syncState, "SYNCED")
+
+// E.6 — GET /snapshot
+let rs = server.handle_request(srv3, "GET", "/snapshot", "ws", { workspaceId: "ws" })?
+let a14 = core.assert_equal("GET /snapshot 200", rs.response.httpStatus, 200)
+let a15 = core.assert_equal("snapshot projectionText matches server", rs.response.body.projectionText, serverText)
+let a16 = core.assert_equal("snapshot version > 0", rs.response.body.version > 0, true)
+
+// E.6 — Snapshot verifies
+let snap_data = rt.get_snapshot(ws_rt)?
+let sv = snap.verify_snapshot(snap_data)?
+let a17 = core.assert_equal("snapshot verifies", sv, true)
+
+// E.7 — CLI smoke: submit -> fetch frames via CLI
+let cli_frames = cli.run_cli(["frames", "--workspace=ws"])?
+let a18 = core.assert_equal("CLI frames command", cli_frames.command, "frames")
+let cli_snap = cli.run_cli(["snapshot", "--workspace=ws"])?
+let a19 = core.assert_equal("CLI snapshot command", cli_snap.command, "snapshot")
+let cli_health = cli.run_cli(["health"])?
+let a20 = core.assert_equal("CLI health ok", cli_health.ok, true)
+
+// E.7 — Full convergence proof
+let a21 = core.assert_equal("server text non-empty", serverText == "", false)
+let a22 = core.assert_equal("client text == server text", caught_up.text, serverText)
+let a23 = core.assert_equal("editor text == server text", final_doc.text, serverText)
+let a24 = core.assert_equal("journal chain valid", journal.verify_chain(jrnl).t, "ok")
+let a25 = core.assert_equal("server request count", srv3.requestCount, 3)
+
+// E.7 — WebSocket session tracks delivery
+let sess = ws.make_session("smoke_client")
+let sess2 = ws.add_subscription(sess, "ws", "main.fard", 0)?
+let bus_frames = ws_rt.bus.frames
+let pending = ws.pending_frame_messages(sess2, "ws", "main.fard", bus_frames)
+let a26 = core.assert_equal("WS pending messages > 0", list.len(pending) > 0, true)
+
+core.ok(core.test_summary("e2e_smoke", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26]))
