@@ -6,7 +6,7 @@ import("./editor_bridge") as bridge
 import("./recovery") as recovery
 
 fn empty_bus(workspaceId) {
-  { workspaceId: workspaceId, frames: [], subscribers: {} }
+  { workspaceId: workspaceId, fileId: "main.fard", frames: [], subscribers: {} }
 }
 
 fn publish_frame(bus, fr) {
@@ -18,7 +18,7 @@ fn publish_frames(bus, frames) {
 }
 
 fn subscribe(bus, clientId, initialText) {
-  let client = bridge.init(bus.workspaceId, "main.fard", initialText) in
+  let client = bridge.init(bus.workspaceId, bus.fileId, initialText) in
   if core.is_err(client) then client else
   let subs2 = rec.set(bus.subscribers, clientId, client.v) in
   core.ok({ ...bus, subscribers: subs2 })

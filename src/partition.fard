@@ -1,0 +1,60 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./distributed_sim") as dsim
+import("./asg") as asg
+
+fn make_partition() {
+  { workspaces: {} }
+}
+
+fn add_workspace(partition, workspaceId, fileId, store) {
+  let r = dsim.make_sim(workspaceId, fileId, store) in
+  if core.is_err(r) then r else
+  let ws2 = rec.set(partition.workspaces, workspaceId, r.v) in
+  core.ok({ ...partition, workspaces: ws2 })
+}
+
+fn get_workspace(partition, workspaceId) {
+  let ws = rec.get(partition.workspaces, workspaceId) in
+  if ws == null then core.err("WORKSPACE_NOT_FOUND", { workspaceId: workspaceId }) else
+  core.ok(ws)
+}
+
+fn route_txs(partition, workspaceId, txs_list) {
+  let ws = rec.get(partition.workspaces, workspaceId) in
+  if ws == null then core.err("WORKSPACE_NOT_FOUND", { workspaceId: workspaceId }) else
+  let r = dsim.ingest_txs(ws, txs_list) in
+  if core.is_err(r) then r else
+  core.ok({ ...partition, workspaces: rec.set(partition.workspaces, workspaceId, r.v) })
+}
+
+fn run_workspace(partition, workspaceId) {
+  let ws = rec.get(partition.workspaces, workspaceId) in
+  if ws == null then core.err("WORKSPACE_NOT_FOUND", { workspaceId: workspaceId }) else
+  let r = dsim.run_consumer(ws) in
+  if core.is_err(r) then r else
+  core.ok({ ...partition, workspaces: rec.set(partition.workspaces, workspaceId, r.v) })
+}
+
+fn add_client(partition, workspaceId, clientId) {
+  let ws = rec.get(partition.workspaces, workspaceId) in
+  if ws == null then core.err("WORKSPACE_NOT_FOUND", { workspaceId: workspaceId }) else
+  let r = dsim.add_client(ws, clientId) in
+  if core.is_err(r) then r else
+  core.ok({ ...partition, workspaces: rec.set(partition.workspaces, workspaceId, r.v) })
+}
+
+fn deliver_workspace(partition, workspaceId) {
+  let ws = rec.get(partition.workspaces, workspaceId) in
+  if ws == null then core.err("WORKSPACE_NOT_FOUND", { workspaceId: workspaceId }) else
+  let r = dsim.deliver_all(ws) in
+  if core.is_err(r) then r else
+  core.ok({ ...partition, workspaces: rec.set(partition.workspaces, workspaceId, r.v) })
+}
+
+fn partition_hash(partition) {
+  core.digest({ workspaceCount: list.len(rec.keys(partition.workspaces)) })
+}
+
+export { make_partition, add_workspace, get_workspace, route_txs, run_workspace, add_client, deliver_workspace, partition_hash }

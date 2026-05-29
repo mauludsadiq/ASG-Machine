@@ -21,7 +21,7 @@ fn make_sim(workspaceId, fileId, store) {
   let g = gateway.empty_gateway(workspaceId) in
   let log = olog.empty_log(workspaceId) in
   let consumer = rc.make_consumer(workspaceId, "reducer", mach, jrnl) in
-  let bus = fbus.empty_bus(workspaceId) in
+  let bus = { ...fbus.empty_bus(workspaceId), fileId: fileId } in
   core.ok({ workspaceId: workspaceId, fileId: fileId, initialText: initialText, gateway: g, log: log, consumer: consumer, bus: bus })
 }
 

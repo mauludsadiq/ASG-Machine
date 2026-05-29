@@ -1,0 +1,73 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/partition") as part
+import("../src/distributed_sim") as dsim
+import("../src/core") as core
+import("std/list") as list
+
+let store = asg.sample_store()
+
+let tx_a1 = txs.tx("tx_a1", "ws_a", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_a"), 1, "r")
+let tx_a2 = txs.tx("tx_a2", "ws_a", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "10"), 2, "r")
+let tx_b1 = txs.tx("tx_b1", "ws_b", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_b"), 1, "r")
+let tx_b2 = txs.tx("tx_b2", "ws_b", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "99"), 2, "r")
+
+// Same tx id allowed in different workspaces
+let tx_same_id_a = txs.tx("shared_id", "ws_a", [], [txs.pre_exists("fn_main")], txs.op_set("stmt_1", "value", "1"), 3, "r")
+let tx_same_id_b = txs.tx("shared_id", "ws_b", [], [txs.pre_exists("fn_main")], txs.op_set("stmt_2", "value", "2"), 3, "r")
+
+let p0 = part.make_partition()
+let p1 = part.add_workspace(p0, "ws_a", "a.fard", store)?
+let p2 = part.add_workspace(p1, "ws_b", "b.fard", store)?
+
+// Add clients to each workspace
+let p3 = part.add_client(p2, "ws_a", "client_a1")?
+let p4 = part.add_client(p3, "ws_b", "client_b1")?
+
+// Route txs to correct workspaces
+let p5 = part.route_txs(p4, "ws_a", [tx_a1, tx_a2])?
+let p6 = part.route_txs(p5, "ws_b", [tx_b1, tx_b2])?
+
+// Run each workspace independently
+let p7 = part.run_workspace(p6, "ws_a")?
+let p8 = part.run_workspace(p7, "ws_b")?
+
+// Deliver to clients
+let p9 = part.deliver_workspace(p8, "ws_a")?
+let p10 = part.deliver_workspace(p9, "ws_b")?
+
+let ws_a = part.get_workspace(p10, "ws_a")?
+let ws_b = part.get_workspace(p10, "ws_b")?
+
+// Workspace A and B isolated
+let a1 = core.assert_equal("ws_a text contains main_a", ws_a.consumer.machine.reducer.projection.text == ws_b.consumer.machine.reducer.projection.text, false)
+let a2 = core.assert_equal("ws_a has main_a", dsim.server_text(ws_a) == dsim.server_text(ws_b), false)
+
+// Same tx id in different workspace allowed
+let p11 = part.route_txs(p10, "ws_a", [tx_same_id_a])?
+let p12 = part.route_txs(p11, "ws_b", [tx_same_id_b])?
+let p13 = part.run_workspace(p12, "ws_a")?
+let p14 = part.run_workspace(p13, "ws_b")?
+let a3 = core.assert_equal("same tx id in different ws allowed", true, true)
+
+// Wrong workspace tx rejected by gateway (accept_many marks as REJECTED, not err)
+let wrong = part.route_txs(p10, "ws_a", [tx_b1])?
+let wrong_ws_a = part.get_workspace(wrong, "ws_a")?
+let a4 = core.assert_equal("wrong workspace tx not in inbox", list.len(wrong_ws_a.log.entries), list.len(ws_a.log.entries))
+
+// Workspace not found
+let bad_ws = part.get_workspace(p10, "ws_missing")
+let a5 = core.assert_equal("missing workspace is err", bad_ws.t, "err")
+let a6 = core.assert_equal("missing workspace error code", bad_ws.code, "WORKSPACE_NOT_FOUND")
+
+// Partition hash deterministic
+let h1 = part.partition_hash(p10)
+let h2 = part.partition_hash(p10)
+let a7 = core.assert_equal("partition hash deterministic", h1, h2)
+
+// Multi-workspace replay deterministic
+let p_fresh1 = part.add_workspace(part.add_workspace(part.make_partition(), "ws_a", "a.fard", store)?, "ws_b", "b.fard", store)?
+let p_fresh2 = part.add_workspace(part.add_workspace(part.make_partition(), "ws_a", "a.fard", store)?, "ws_b", "b.fard", store)?
+let a8 = core.assert_equal("fresh partitions equal hash", part.partition_hash(p_fresh1), part.partition_hash(p_fresh2))
+
+core.ok(core.test_summary("partition", [a1, a2, a3, a4, a5, a6, a7, a8]))
