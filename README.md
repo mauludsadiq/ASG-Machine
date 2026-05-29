@@ -19,20 +19,24 @@ This package implements:
 - Semantic transactions with dependencies and preconditions.
 - Reducer frame machine with global versions and frame hashes.
 - LCG-seeded pseudo-random operation generation for convergence harness.
+- Deterministic editor bridge for client-side frame replay.
+- Incremental projection engine with minimal subtree diffs.
 - Isolated unit tests for every module with hard invariant assertions.
 
 ## Layout
 
-    src/core.fard          shared result/assert/hash helpers
-    src/asg.fard           ASG store and structural mutation
-    src/rope.fard          segment rope and text range replacement
-    src/projection.fard    ASG -> text projection and incremental mutation
-    src/transactions.fard  transaction/precondition evaluation
-    src/reducer.fard       deterministic reducer
-    src/frame.fard         batch frame machine and replay
-    src/harness.fard       deterministic convergence harness
-    main.fard              executable demo summary
-    tests/*.fard           executable test programs
+    src/core.fard                    shared result/assert/hash helpers
+    src/asg.fard                     ASG store and structural mutation
+    src/rope.fard                    segment rope and text range replacement
+    src/projection.fard              ASG -> text projection and incremental mutation
+    src/incremental_projection.fard  minimal subtree diff engine
+    src/transactions.fard            transaction/precondition evaluation
+    src/reducer.fard                 deterministic reducer
+    src/frame.fard                   batch frame machine and replay
+    src/editor_bridge.fard           deterministic client-side frame replay
+    src/harness.fard                 deterministic convergence harness
+    main.fard                        executable demo summary
+    tests/*.fard                     executable test programs
 
 ## Run
 
@@ -50,6 +54,12 @@ From this directory:
 The implementation avoids placeholders and stubs: all exported functions perform
 concrete validation or mutation and return deterministic records.
 
+## Scale
+
+    1,743 lines of FARD across 29 files
+    864 lines source (10 modules)
+    876 lines tests (19 test programs)
+
 ## Test Suite
 
 | File | Assertions | Coverage |
@@ -61,17 +71,19 @@ concrete validation or mutation and return deterministic records.
 | test_projection.fard | 9 | hash determinism, nodeMap totality, mutation diff |
 | test_projection_stability.fard | 11 | rename-to-same, stale invariant detection |
 | test_projection_node_count.fard | 12 | nodeMap completeness across all fixtures |
-| test_validate_projection.fard | 14 | TEXT_MISMATCH, HASH_MISMATCH, happy path, all fixtures |
+| test_validate_projection.fard | 14 | TEXT_MISMATCH, HASH_MISMATCH, happy path |
+| test_incremental_projection.fard | 17 | minimal diffs, offset computation, hash preservation |
 | test_idempotency.fard | 5 | same-batch and cross-batch duplicate handling |
 | test_pending_resolution.fard | 4 | PENDING -> auto-retry when dependency arrives |
 | test_convergence.fard | 10 | 50-tx convergence, all invariants hard-asserted |
 | test_replay.fard | 10 | empty/single/multi frame replay, text and hash |
-| test_reducer_failure.fard | — | failure suite via harness |
-| test_reducer_edges.fard | — | edge cases via harness |
+| test_editor_bridge.fard | 17 | single/multi frame apply, stale/gap rejection, determinism |
+| test_reducer_failure.fard | - | failure suite via harness |
+| test_reducer_edges.fard | - | edge cases via harness |
 | run_all.fard | 12 | fast full suite with hard invariant assertions |
 | test_stress_convergence.fard | 8 | 100-tx and batch-1 convergence (~80s) |
 
-Total: 16 test files, 151+ assertions, 0 failures.
+Total: 18 test files, 185+ assertions, 0 failures.
 
 ## Documented Behaviors
 
@@ -101,6 +113,20 @@ DUPLICATE on the second occurrence. State and hash are unaffected.
 - PROJECTION_HASH_MISMATCH: returned when text matches but hash does not.
   data.expected = correct hash, data.actual = stale hash.
 
+**Editor bridge frame tracking:**
+
+The editor bridge tracks frames by frameId (sequence number), not globalVersion.
+Frames are rejected as STALE_FRAME if frameId <= clientVersion, and as FRAME_GAP
+if frameId != clientVersion + 1. Duplicate frames (already applied frameId) are
+silently skipped without error.
+
+**Incremental projection diffs:**
+
+minimal_projection_diff() computes the span of the affected projection subtree
+and emits a diff covering only that span. Falls back to full-document replacement
+when the target node is deleted or not found in the new projection.
+Unchanged subtree hashes are preserved across mutations.
+
 ## Store Fixtures
 
 Three fixtures are available in asg.fard for testing:
@@ -111,7 +137,7 @@ Three fixtures are available in asg.fard for testing:
 
 ## Proof of Execution
 
-Version: v0.1.3 — Phase A complete
+Version: v0.1.3 (Phase A) + B.1 editor bridge + B.2 incremental projection
 
 Fast suite verified properties:
 
@@ -124,6 +150,10 @@ Fast suite verified properties:
 - Reducer edge cases: PASS
 - validate_projection TEXT_MISMATCH: PASS
 - validate_projection HASH_MISMATCH: PASS
+- Editor bridge stale/gap rejection: PASS
+- Editor bridge replay determinism: PASS
+- Incremental projection minimal diffs: PASS
+- Incremental projection hash preservation: PASS
 
 Stress suite verified properties:
 
