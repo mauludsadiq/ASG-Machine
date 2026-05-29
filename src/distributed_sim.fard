@@ -1,0 +1,75 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./gateway") as gateway
+import("./ordered_log") as olog
+import("./reducer_consumer") as rc
+import("./frame_bus") as fbus
+import("./frame") as frm
+import("./journal") as journal
+import("./editor_bridge") as bridge
+import("./recovery") as recovery
+import("./asg") as asg
+import("./reducer") as reducer
+
+fn make_sim(workspaceId, fileId, store) {
+  let rr = reducer.init(workspaceId, fileId, store) in
+  if core.is_err(rr) then rr else
+  let initialText = rr.v.projection.text in
+  let mach = frm.make_machine(rr.v, 10, 0) in
+  let jrnl = journal.empty_journal(workspaceId, fileId) in
+  let g = gateway.empty_gateway(workspaceId) in
+  let log = olog.empty_log(workspaceId) in
+  let consumer = rc.make_consumer(workspaceId, "reducer", mach, jrnl) in
+  let bus = fbus.empty_bus(workspaceId) in
+  core.ok({ workspaceId: workspaceId, fileId: fileId, initialText: initialText, gateway: g, log: log, consumer: consumer, bus: bus })
+}
+
+fn ingest_txs(sim, txs_list) {
+  let r = gateway.accept_many(sim.gateway, txs_list) in
+  if core.is_err(r) then r else
+  let drained = gateway.drain_inbox(r.v.gateway) in
+  let log2 = olog.append_many(sim.log, list.map(drained.txs, fn(e) { e })) in
+  core.ok({ ...sim, gateway: drained.gateway, log: log2 })
+}
+
+fn run_consumer(sim) {
+  let r = rc.consume_all(sim.consumer, sim.log, 10) in
+  if core.is_err(r) then r else
+  let c2 = r.v in
+  let newFrames = list.drop(c2.machine.frames, list.len(sim.consumer.machine.frames)) in
+  let bus2 = fbus.publish_frames(sim.bus, newFrames) in
+  core.ok({ ...sim, consumer: c2, bus: bus2 })
+}
+
+fn add_client(sim, clientId) {
+  let r = fbus.subscribe(sim.bus, clientId, sim.initialText) in
+  if core.is_err(r) then r else
+  core.ok({ ...sim, bus: r.v })
+}
+
+fn deliver_all(sim) {
+  let r = fbus.deliver_to_all(sim.bus, 0) in
+  if core.is_err(r) then r else
+  core.ok({ ...sim, bus: r.v })
+}
+
+fn get_client_text(sim, clientId) {
+  let r = fbus.get_subscriber(sim.bus, clientId) in
+  if core.is_err(r) then r else
+  core.ok(r.v.text)
+}
+
+fn server_text(sim) {
+  sim.consumer.machine.reducer.projection.text
+}
+
+fn run_full(sim, txs_list) {
+  let r1 = ingest_txs(sim, txs_list) in
+  if core.is_err(r1) then r1 else
+  let r2 = run_consumer(r1.v) in
+  if core.is_err(r2) then r2 else
+  deliver_all(r2.v)
+}
+
+export { make_sim, ingest_txs, run_consumer, add_client, deliver_all, get_client_text, server_text, run_full }

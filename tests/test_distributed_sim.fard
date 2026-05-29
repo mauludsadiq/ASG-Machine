@@ -1,0 +1,70 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/distributed_sim") as sim
+import("../src/journal") as journal
+import("../src/editor_bridge") as bridge
+import("../src/recovery") as recovery
+import("../src/core") as core
+import("std/list") as list
+
+let store = asg.sample_store()
+let s0 = sim.make_sim("ws", "main.fard", store)?
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r_a")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r_b")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r_a")
+let tx4 = txs.tx("tx4", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v2"), 4, "r_b")
+
+// Add 5 clients
+let s1 = sim.add_client(s0, "c1")?
+let s2 = sim.add_client(s1, "c2")?
+let s3 = sim.add_client(s2, "c3")?
+let s4 = sim.add_client(s3, "c4")?
+let s5 = sim.add_client(s4, "c5")?
+
+// Run full pipeline
+let sf = sim.run_full(s5, [tx1, tx2, tx3, tx4])?
+let serverTxt = sim.server_text(sf)
+
+// All clients converge
+let t1 = sim.get_client_text(sf, "c1")?
+let t2 = sim.get_client_text(sf, "c2")?
+let t3 = sim.get_client_text(sf, "c3")?
+let t4 = sim.get_client_text(sf, "c4")?
+let t5 = sim.get_client_text(sf, "c5")?
+let a1 = core.assert_equal("c1 converges", t1, serverTxt)
+let a2 = core.assert_equal("c2 converges", t2, serverTxt)
+let a3 = core.assert_equal("c3 converges", t3, serverTxt)
+let a4 = core.assert_equal("c4 converges", t4, serverTxt)
+let a5 = core.assert_equal("c5 converges", t5, serverTxt)
+
+// server text == all client text
+let all_equal = t1 == t2 && t2 == t3 && t3 == t4 && t4 == t5
+let a6 = core.assert_equal("all clients text equal", all_equal, true)
+
+// journal replay == live broadcast replay
+let replayed = journal.replay_journal(sf.consumer.journal, sf.initialText)?
+let a7 = core.assert_equal("journal replay text matches server", replayed.text, serverTxt)
+
+// duplicate broadcasts do not change final hash
+let sf2 = sim.deliver_all(sf)?
+let t1b = sim.get_client_text(sf2, "c1")?
+let a8 = core.assert_equal("duplicate broadcast unchanged", t1b, t1)
+
+// client disconnect/reconnect: new client catches up via recovery
+let s_new = sim.add_client(sf, "c_late")?
+let sf3 = sim.deliver_all(s_new)?
+let t_late = sim.get_client_text(sf3, "c_late")?
+let a9 = core.assert_equal("late client converges after delivery", t_late, serverTxt)
+
+// delayed broadcasts converge after recovery via journal
+let late_client = bridge.init("ws", "main.fard", sf.initialText)?
+let recovered = recovery.replay_since(late_client, sf.consumer.journal, 0)?
+let a10 = core.assert_equal("journal recovery matches server", recovered.text, serverTxt)
+
+// gateway deduplication in pipeline
+let sf_dup = sim.run_full(sf, [tx1, tx2])?
+let t1_dup = sim.get_client_text(sf_dup, "c1")?
+let a11 = core.assert_equal("duplicate ingress does not change text", t1_dup, serverTxt)
+
+core.ok(core.test_summary("distributed_sim", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11]))
