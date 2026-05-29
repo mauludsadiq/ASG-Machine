@@ -1,0 +1,118 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+
+// WebSocket/long-poll frame stream protocol.
+// Defines message shapes, session state, and delivery semantics.
+// No real network — deterministic message contract only.
+
+// Message types (client -> server)
+fn msg_subscribe(workspaceId, fileId, sinceFrameId) {
+  { type: "SUBSCRIBE", workspaceId: workspaceId, fileId: fileId, sinceFrameId: sinceFrameId }
+}
+
+fn msg_unsubscribe(workspaceId, fileId) {
+  { type: "UNSUBSCRIBE", workspaceId: workspaceId, fileId: fileId }
+}
+
+fn msg_ping(clientId) {
+  { type: "PING", clientId: clientId }
+}
+
+// Message types (server -> client)
+fn msg_frame(fr, workspaceId, fileId) {
+  {
+    type: "FRAME",
+    workspaceId: workspaceId,
+    fileId: fileId,
+    frameId: fr.frameId,
+    globalVersion: fr.globalVersion,
+    frameHash: fr.frameHash,
+    diffs: fr.derivedEffects.projectionDiffs
+  }
+}
+
+fn msg_pong(clientId, serverVersion) {
+  { type: "PONG", clientId: clientId, serverVersion: serverVersion }
+}
+
+fn msg_error(code, detail) {
+  { type: "ERROR", code: code, detail: detail }
+}
+
+fn msg_subscribed(workspaceId, fileId, currentFrameId) {
+  { type: "SUBSCRIBED", workspaceId: workspaceId, fileId: fileId, currentFrameId: currentFrameId }
+}
+
+// Session state
+fn make_session(clientId) {
+  { clientId: clientId, subscriptions: {}, connected: true, messagesSent: 0, messagesReceived: 0 }
+}
+
+fn add_subscription(session, workspaceId, fileId, sinceFrameId) {
+  let key = str.concat([workspaceId, ":", fileId]) in
+  let sub = { workspaceId: workspaceId, fileId: fileId, sinceFrameId: sinceFrameId, deliveredUpTo: sinceFrameId } in
+  core.ok({ ...session, subscriptions: rec.set(session.subscriptions, key, sub) })
+}
+
+fn remove_subscription(session, workspaceId, fileId) {
+  let key = str.concat([workspaceId, ":", fileId]) in
+  if !rec.has(session.subscriptions, key) then
+    core.err("SUBSCRIPTION_NOT_FOUND", { workspaceId: workspaceId, fileId: fileId }) else
+  core.ok({ ...session, subscriptions: rec.remove(session.subscriptions, key) })
+}
+
+fn mark_delivered(session, workspaceId, fileId, frameId) {
+  let key = str.concat([workspaceId, ":", fileId]) in
+  let sub = rec.get(session.subscriptions, key) in
+  if sub == null then core.err("SUBSCRIPTION_NOT_FOUND", { workspaceId: workspaceId, fileId: fileId }) else
+  if frameId <= sub.deliveredUpTo then
+    core.err("FRAME_ALREADY_DELIVERED", { frameId: frameId, deliveredUpTo: sub.deliveredUpTo }) else
+  let sub2 = { ...sub, deliveredUpTo: frameId } in
+  core.ok({ ...session, subscriptions: rec.set(session.subscriptions, key, sub2), messagesSent: session.messagesSent + 1 })
+}
+
+fn get_subscription(session, workspaceId, fileId) {
+  let key = str.concat([workspaceId, ":", fileId]) in
+  let sub = rec.get(session.subscriptions, key) in
+  if sub == null then core.err("SUBSCRIPTION_NOT_FOUND", { workspaceId: workspaceId, fileId: fileId }) else
+  core.ok(sub)
+}
+
+fn disconnect(session) {
+  { ...session, connected: false }
+}
+
+// Validate inbound client message
+fn validate_client_message(msg) {
+  if !rec.has(msg, "type") then core.err("MISSING_TYPE", {}) else
+  if msg.type == "SUBSCRIBE" then
+    if !rec.has(msg, "workspaceId") || !rec.has(msg, "fileId") || !rec.has(msg, "sinceFrameId") then
+      core.err("MISSING_FIELDS", { type: msg.type }) else
+    core.ok(true) else
+  if msg.type == "UNSUBSCRIBE" then
+    if !rec.has(msg, "workspaceId") || !rec.has(msg, "fileId") then
+      core.err("MISSING_FIELDS", { type: msg.type }) else
+    core.ok(true) else
+  if msg.type == "PING" then
+    if !rec.has(msg, "clientId") then
+      core.err("MISSING_FIELDS", { type: msg.type }) else
+    core.ok(true) else
+  core.err("UNKNOWN_MESSAGE_TYPE", { type: msg.type })
+}
+
+// Build outbound frame messages for pending delivery
+fn pending_frame_messages(session, workspaceId, fileId, availableFrames) {
+  let key = str.concat([workspaceId, ":", fileId]) in
+  let sub = rec.get(session.subscriptions, key) in
+  if sub == null then [] else
+  let pending = list.filter(availableFrames, fn(fr) { fr.frameId > sub.deliveredUpTo }) in
+  list.map(pending, fn(fr) { msg_frame(fr, workspaceId, fileId) })
+}
+
+fn session_hash(session) {
+  core.digest({ clientId: session.clientId, subscriptionCount: list.len(rec.keys(session.subscriptions)), messagesSent: session.messagesSent })
+}
+
+export { msg_subscribe, msg_unsubscribe, msg_ping, msg_frame, msg_pong, msg_error, msg_subscribed, make_session, add_subscription, remove_subscription, mark_delivered, get_subscription, disconnect, validate_client_message, pending_frame_messages, session_hash }

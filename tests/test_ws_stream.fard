@@ -1,0 +1,99 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/ws_stream") as ws
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let mach = frm.make_machine(rr, 3, 10)
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r")
+let m = frm.run_batches(mach, [tx1, tx2, tx3])?
+let frames = m.frames
+
+// message shapes
+let sub_msg = ws.msg_subscribe("ws", "main.fard", 0)
+let a1 = core.assert_equal("subscribe msg type", sub_msg.type, "SUBSCRIBE")
+let a2 = core.assert_equal("subscribe msg workspaceId", sub_msg.workspaceId, "ws")
+let a3 = core.assert_equal("subscribe msg sinceFrameId", sub_msg.sinceFrameId, 0)
+
+let unsub_msg = ws.msg_unsubscribe("ws", "main.fard")
+let a4 = core.assert_equal("unsubscribe msg type", unsub_msg.type, "UNSUBSCRIBE")
+
+let ping_msg = ws.msg_ping("client_1")
+let a5 = core.assert_equal("ping msg type", ping_msg.type, "PING")
+
+let frame_msg = ws.msg_frame(list.get(frames, 0), "ws", "main.fard")
+let a6 = core.assert_equal("frame msg type", frame_msg.type, "FRAME")
+let a7 = core.assert_equal("frame msg frameId", frame_msg.frameId, list.get(frames, 0).frameId)
+let a8 = core.assert_equal("frame msg has diffs", list.len(frame_msg.diffs) > 0, true)
+
+let pong_msg = ws.msg_pong("client_1", 3)
+let a9 = core.assert_equal("pong msg type", pong_msg.type, "PONG")
+let a10 = core.assert_equal("pong msg serverVersion", pong_msg.serverVersion, 3)
+
+let err_msg = ws.msg_error("WORKSPACE_NOT_FOUND", "ws_x does not exist")
+let a11 = core.assert_equal("error msg type", err_msg.type, "ERROR")
+let a12 = core.assert_equal("error msg code", err_msg.code, "WORKSPACE_NOT_FOUND")
+
+// session state
+let sess = ws.make_session("client_1")
+let a13 = core.assert_equal("session connected", sess.connected, true)
+let a14 = core.assert_equal("session no subscriptions", list.len(rec.keys(sess.subscriptions)), 0)
+
+// add subscription
+let sess2 = ws.add_subscription(sess, "ws", "main.fard", 0)?
+let a15 = core.assert_equal("subscription added", list.len(rec.keys(sess2.subscriptions)), 1)
+let sub = ws.get_subscription(sess2, "ws", "main.fard")?
+let a16 = core.assert_equal("subscription deliveredUpTo", sub.deliveredUpTo, 0)
+
+// mark_delivered
+let sess3 = ws.mark_delivered(sess2, "ws", "main.fard", 1)?
+let sub2 = ws.get_subscription(sess3, "ws", "main.fard")?
+let a17 = core.assert_equal("deliveredUpTo updated", sub2.deliveredUpTo, 1)
+let a18 = core.assert_equal("messagesSent incremented", sess3.messagesSent, 1)
+
+// mark_delivered already delivered rejected
+let bad_deliver = ws.mark_delivered(sess3, "ws", "main.fard", 1)
+let a19 = core.assert_equal("already delivered is err", bad_deliver.t, "err")
+let a20 = core.assert_equal("already delivered code", bad_deliver.code, "FRAME_ALREADY_DELIVERED")
+
+// remove subscription
+let sess4 = ws.remove_subscription(sess3, "ws", "main.fard")?
+let a21 = core.assert_equal("subscription removed", list.len(rec.keys(sess4.subscriptions)), 0)
+
+// remove nonexistent subscription
+let bad_remove = ws.remove_subscription(sess, "ws", "other.fard")
+let a22 = core.assert_equal("remove nonexistent is err", bad_remove.t, "err")
+let a23 = core.assert_equal("remove nonexistent code", bad_remove.code, "SUBSCRIPTION_NOT_FOUND")
+
+// validate_client_message
+let a24 = core.assert_equal("valid subscribe msg ok", ws.validate_client_message(sub_msg).t, "ok")
+let a25 = core.assert_equal("valid ping msg ok", ws.validate_client_message(ping_msg).t, "ok")
+let bad_msg = { type: "SUBSCRIBE" }
+let a26 = core.assert_equal("incomplete subscribe is err", ws.validate_client_message(bad_msg).t, "err")
+let unknown_msg = { type: "EXPLODE" }
+let a27 = core.assert_equal("unknown type is err", ws.validate_client_message(unknown_msg).t, "err")
+let a28 = core.assert_equal("unknown type code", ws.validate_client_message(unknown_msg).code, "UNKNOWN_MESSAGE_TYPE")
+
+// pending_frame_messages
+let pending = ws.pending_frame_messages(sess2, "ws", "main.fard", frames)
+let a29 = core.assert_equal("pending frames count", list.len(pending), list.len(frames))
+let pending_after = ws.pending_frame_messages(sess3, "ws", "main.fard", frames)
+let a30 = core.assert_equal("pending after delivery reduced", list.len(pending_after), list.len(frames) - 1)
+
+// disconnect
+let sess_dc = ws.disconnect(sess2)
+let a31 = core.assert_equal("disconnected session", sess_dc.connected, false)
+
+// session_hash deterministic
+let h1 = ws.session_hash(sess3)
+let h2 = ws.session_hash(sess3)
+let a32 = core.assert_equal("session hash deterministic", h1, h2)
+
+core.ok(core.test_summary("ws_stream", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32]))
