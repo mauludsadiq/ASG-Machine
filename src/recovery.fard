@@ -1,0 +1,50 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./journal") as journal
+import("./editor_bridge") as bridge
+
+// Compute the recovery state for a client at a given version.
+// Returns the entries the client needs to catch up.
+fn recovery_state(jrnl, clientVersion) {
+  let missing = journal.frames_since(jrnl, clientVersion) in
+  let total = list.len(jrnl.entries) in
+  let needed = list.len(missing) in
+  core.ok({
+    clientVersion: clientVersion,
+    serverVersion: if total == 0 then 0 else list.last(jrnl.entries).frameId,
+    missingCount: needed,
+    missingEntries: missing,
+    upToDate: needed == 0
+  })
+}
+
+// Stream missing frames to a client state, catching it up deterministically.
+fn replay_since(clientState, jrnl, fromVersion) {
+  let missing = journal.frames_since(jrnl, fromVersion) in
+  if list.len(missing) == 0 then core.ok(clientState) else
+  let frames = list.map(missing, fn(e) {
+    {
+      frameId: e.frameId,
+      globalVersion: e.globalVersion,
+      frameHash: e.frameHash,
+      derivedEffects: { projectionDiffs: e.projectionDiffs, invalidatedSymbolScopes: [], diagnosticsInvalidated: false, vfsVersion: e.globalVersion },
+      transactionResults: e.transactionResults,
+      transactionsApplied: [],
+      workspaceId: jrnl.workspaceId,
+      timestampObservedMs: 0
+    }
+  }) in
+  bridge.apply_frames(clientState, frames)
+}
+
+// Stale recovery: client claims a version higher than server has.
+fn check_recovery_valid(jrnl, clientVersion) {
+  let total = list.len(jrnl.entries) in
+  let serverVersion = if total == 0 then 0 else list.last(jrnl.entries).frameId in
+  if clientVersion > serverVersion then
+    core.err("RECOVERY_CLIENT_AHEAD", { clientVersion: clientVersion, serverVersion: serverVersion }) else
+  core.ok(true)
+}
+
+export { recovery_state, replay_since, check_recovery_valid }

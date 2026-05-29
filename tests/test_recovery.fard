@@ -1,0 +1,76 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/journal") as journal
+import("../src/editor_bridge") as bridge
+import("../src/recovery") as recovery
+import("../src/core") as core
+import("std/list") as list
+
+// Build a real frame stream
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let initialText = rr.projection.text
+let mach = frm.make_machine(rr, 3, 10)
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r")
+let tx4 = txs.tx("tx4", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v2"), 4, "r")
+
+let m = frm.run_batches(mach, [tx1, tx2, tx3, tx4])?
+let frames = m.frames
+let serverText = m.reducer.projection.text
+let reducerHash = asg.snapshot_hash(m.reducer.store)
+
+// Build journal from all frames
+let jrnl = journal.append_frames(journal.empty_journal("ws", "main.fard"), frames, reducerHash)
+
+// recovery_state for fresh client (version 0)
+let rs0 = recovery.recovery_state(jrnl, 0)?
+let a1 = core.assert_equal("fresh client needs all frames", rs0.missingCount, list.len(frames))
+let a2 = core.assert_equal("fresh client not up to date", rs0.upToDate, false)
+let a3 = core.assert_equal("serverVersion correct", rs0.serverVersion, list.last(frames).frameId)
+
+// recovery_state for up-to-date client
+let rs_full = recovery.recovery_state(jrnl, list.last(frames).frameId)?
+let a4 = core.assert_equal("up-to-date client needs nothing", rs_full.missingCount, 0)
+let a5 = core.assert_equal("up-to-date client upToDate", rs_full.upToDate, true)
+
+// recovery_state for partial client (has frame 1)
+let rs_partial = recovery.recovery_state(jrnl, 1)?
+let a6 = core.assert_equal("partial client missing count", rs_partial.missingCount, list.len(frames) - 1)
+
+// check_recovery_valid: client ahead of server fails
+let cv_bad = recovery.check_recovery_valid(jrnl, 999)
+let a7 = core.assert_equal("client ahead fails", cv_bad.t, "err")
+let a8 = core.assert_equal("client ahead error code", cv_bad.code, "RECOVERY_CLIENT_AHEAD")
+
+// check_recovery_valid: valid client passes
+let cv_ok = recovery.check_recovery_valid(jrnl, 1)?
+let a9 = core.assert_equal("valid recovery passes", cv_ok, true)
+
+// replay_since from version 0: full catch-up
+let client0 = bridge.init("ws", "main.fard", initialText)?
+let caught_up = recovery.replay_since(client0, jrnl, 0)?
+let a10 = core.assert_equal("full catch-up text matches server", caught_up.text, serverText)
+let a11 = core.assert_equal("full catch-up version matches", caught_up.globalVersion, list.last(frames).frameId)
+
+// replay_since from version 1: partial catch-up
+let client1 = bridge.apply_frames(client0, [list.get(frames, 0)])?
+let partial_catchup = recovery.replay_since(client1, jrnl, 1)?
+let a12 = core.assert_equal("partial catch-up text matches server", partial_catchup.text, serverText)
+
+// replay determinism: two fresh clients catch up identically
+let ca = recovery.replay_since(bridge.init("ws", "main.fard", initialText)?, jrnl, 0)?
+let cb = recovery.replay_since(bridge.init("ws", "main.fard", initialText)?, jrnl, 0)?
+let a13 = core.assert_equal("replay determinism text", ca.text, cb.text)
+let a14 = core.assert_equal("replay determinism hash", bridge.state_hash(ca), bridge.state_hash(cb))
+
+// replay_since on empty journal returns client unchanged
+let jrnl0 = journal.empty_journal("ws", "main.fard")
+let c_empty = recovery.replay_since(client0, jrnl0, 0)?
+let a15 = core.assert_equal("empty journal replay unchanged text", c_empty.text, initialText)
+
+core.ok(core.test_summary("recovery", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15]))
