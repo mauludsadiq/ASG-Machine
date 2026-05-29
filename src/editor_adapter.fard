@@ -1,0 +1,93 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./editor_bridge") as bridge
+import("./ws_stream") as ws
+
+// Browser/editor adapter spec.
+// Defines the contract between the ASG Machine and external editors.
+// Covers: document model, cursor/selection, edit ops, sync state.
+// No real editor binding — deterministic adapter contract only.
+
+// Editor document state as seen by an external editor
+fn make_editor_doc(fileId, initialText) {
+  {
+    fileId: fileId,
+    text: initialText,
+    version: 0,
+    dirty: false,
+    syncState: "DISCONNECTED"
+  }
+}
+
+// Sync states: DISCONNECTED, CONNECTING, SYNCED, BEHIND, ERROR
+fn set_sync_state(doc, state) {
+  let valid = ["DISCONNECTED", "CONNECTING", "SYNCED", "BEHIND", "ERROR"] in
+  if !list.any(valid, fn(s) { s == state }) then
+    core.err("INVALID_SYNC_STATE", { state: state }) else
+  core.ok({ ...doc, syncState: state })
+}
+
+// Apply a projection diff to an editor document
+fn apply_diff_to_doc(doc, diff) {
+  if diff.fileId != doc.fileId then
+    core.err("FILE_MISMATCH", { expected: doc.fileId, got: diff.fileId }) else
+  let before = str.slice(doc.text, 0, diff.start) in
+  let after = str.slice(doc.text, diff.end, str.len(doc.text)) in
+  let newText = str.concat([before, diff.newText, after]) in
+  core.ok({ ...doc, text: newText, version: diff.globalVersion, dirty: false, syncState: "SYNCED" })
+}
+
+fn apply_diffs_to_doc(doc, diffs) {
+  list.fold(diffs, core.ok(doc), fn(acc, diff) {
+    if core.is_err(acc) then acc else apply_diff_to_doc(acc.v, diff)
+  })
+}
+
+// Apply a frame message to editor doc
+fn apply_frame_msg_to_doc(doc, frame_msg) {
+  apply_diffs_to_doc(doc, frame_msg.diffs)
+}
+
+// Local edit: mark doc dirty, update text
+fn apply_local_edit(doc, newText) {
+  { ...doc, text: newText, dirty: true, syncState: "BEHIND" }
+}
+
+// Cursor position within document
+fn make_cursor(line, col) { { line: line, col: col } }
+
+fn cursor_offset(doc, cursor) {
+  let lines = str.split_lines(doc.text) in
+  if cursor.line >= list.len(lines) then
+    core.err("CURSOR_OUT_OF_BOUNDS", { line: cursor.line, lineCount: list.len(lines) }) else
+  let prefix_lines = list.take(lines, cursor.line) in
+  let prefix_len = list.fold(prefix_lines, 0, fn(acc, l) { acc + str.len(l) + 1 }) in
+  core.ok(prefix_len + cursor.col)
+}
+
+// Selection range
+fn make_selection(startLine, startCol, endLine, endCol) {
+  { start: make_cursor(startLine, startCol), end: make_cursor(endLine, endCol) }
+}
+
+// Adapter capability declaration
+fn make_adapter_caps(supportsIncrementalDiff, supportsMultiCursor, maxBatchSize) {
+  { supportsIncrementalDiff: supportsIncrementalDiff, supportsMultiCursor: supportsMultiCursor, maxBatchSize: maxBatchSize }
+}
+
+// Adapter handshake: client declares caps, server responds with session config
+fn handshake_request(clientId, caps) {
+  { type: "HANDSHAKE", clientId: clientId, caps: caps }
+}
+
+fn handshake_response(clientId, sessionId, serverCaps) {
+  { type: "HANDSHAKE_OK", clientId: clientId, sessionId: sessionId, serverCaps: serverCaps }
+}
+
+fn doc_hash(doc) {
+  core.digest({ fileId: doc.fileId, version: doc.version, text: doc.text })
+}
+
+export { make_editor_doc, set_sync_state, apply_diff_to_doc, apply_diffs_to_doc, apply_frame_msg_to_doc, apply_local_edit, make_cursor, cursor_offset, make_selection, make_adapter_caps, handshake_request, handshake_response, doc_hash }

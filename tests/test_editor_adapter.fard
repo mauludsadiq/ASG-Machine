@@ -1,0 +1,90 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/ws_stream") as ws
+import("../src/editor_adapter") as adapter
+import("../src/core") as core
+import("std/list") as list
+import("std/str") as str
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let initialText = rr.projection.text
+let mach = frm.make_machine(rr, 3, 10)
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let m = frm.run_batches(mach, [tx1])?
+let frames = m.frames
+let serverText = m.reducer.projection.text
+
+// make_editor_doc
+let doc = adapter.make_editor_doc("main.fard", initialText)
+let a1 = core.assert_equal("doc fileId", doc.fileId, "main.fard")
+let a2 = core.assert_equal("doc initial version", doc.version, 0)
+let a3 = core.assert_equal("doc initial syncState", doc.syncState, "DISCONNECTED")
+let a4 = core.assert_equal("doc not dirty", doc.dirty, false)
+
+// set_sync_state
+let doc2 = adapter.set_sync_state(doc, "CONNECTING")?
+let a5 = core.assert_equal("sync state set", doc2.syncState, "CONNECTING")
+let bad_state = adapter.set_sync_state(doc, "EXPLODING")
+let a6 = core.assert_equal("invalid sync state is err", bad_state.t, "err")
+let a7 = core.assert_equal("invalid sync state code", bad_state.code, "INVALID_SYNC_STATE")
+
+// apply_diff_to_doc
+let diffs = list.get(frames, 0).derivedEffects.projectionDiffs
+let doc3 = adapter.apply_diffs_to_doc(doc, diffs)?
+let a8 = core.assert_equal("doc text after diffs", doc3.text, serverText)
+let a9 = core.assert_equal("doc synced after diffs", doc3.syncState, "SYNCED")
+let a10 = core.assert_equal("doc not dirty after sync", doc3.dirty, false)
+
+// wrong fileId rejected
+let wrong_diff = { ...list.get(diffs, 0), fileId: "other.fard" }
+let bad_diff = adapter.apply_diff_to_doc(doc, wrong_diff)
+let a11 = core.assert_equal("wrong fileId is err", bad_diff.t, "err")
+let a12 = core.assert_equal("wrong fileId code", bad_diff.code, "FILE_MISMATCH")
+
+// apply_frame_msg_to_doc
+let frame_msg = ws.msg_frame(list.get(frames, 0), "ws", "main.fard")
+let doc4 = adapter.apply_frame_msg_to_doc(doc, frame_msg)?
+let a13 = core.assert_equal("frame msg applied text", doc4.text, serverText)
+
+// apply_local_edit
+let doc5 = adapter.apply_local_edit(doc3, "fn edited() {}")
+let a14 = core.assert_equal("local edit dirty", doc5.dirty, true)
+let a15 = core.assert_equal("local edit syncState", doc5.syncState, "BEHIND")
+let a16 = core.assert_equal("local edit text", doc5.text, "fn edited() {}")
+
+// cursor_offset
+let cursor = adapter.make_cursor(0, 3)
+let offset = adapter.cursor_offset(doc, cursor)?
+let a17 = core.assert_equal("cursor offset line 0 col 3", offset, 3)
+
+// cursor out of bounds
+let bad_cursor = adapter.make_cursor(999, 0)
+let bad_offset = adapter.cursor_offset(doc, bad_cursor)
+let a18 = core.assert_equal("cursor OOB is err", bad_offset.t, "err")
+let a19 = core.assert_equal("cursor OOB code", bad_offset.code, "CURSOR_OUT_OF_BOUNDS")
+
+// make_selection
+let sel = adapter.make_selection(0, 0, 0, 5)
+let a20 = core.assert_equal("selection start line", sel.start.line, 0)
+let a21 = core.assert_equal("selection end col", sel.end.col, 5)
+
+// handshake
+let caps = adapter.make_adapter_caps(true, false, 100)
+let hs_req = adapter.handshake_request("client_1", caps)
+let a22 = core.assert_equal("handshake req type", hs_req.type, "HANDSHAKE")
+let a23 = core.assert_equal("handshake caps incremental", hs_req.caps.supportsIncrementalDiff, true)
+let hs_resp = adapter.handshake_response("client_1", "session_abc", caps)
+let a24 = core.assert_equal("handshake resp type", hs_resp.type, "HANDSHAKE_OK")
+let a25 = core.assert_equal("handshake resp sessionId", hs_resp.sessionId, "session_abc")
+
+// doc_hash deterministic
+let h1 = adapter.doc_hash(doc3)
+let h2 = adapter.doc_hash(doc3)
+let a26 = core.assert_equal("doc hash deterministic", h1, h2)
+let h3 = adapter.doc_hash(doc5)
+let a27 = core.assert_equal("different doc different hash", h1 == h3, false)
+
+core.ok(core.test_summary("editor_adapter", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27]))
