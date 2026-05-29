@@ -1,0 +1,67 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/journal") as journal
+import("../src/vfs") as vfs
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let initialText = rr.projection.text
+let mach = frm.make_machine(rr, 3, 10)
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r")
+
+let m = frm.run_batches(mach, [tx1, tx2, tx3])?
+let frames = m.frames
+let serverText = m.reducer.projection.text
+let reducerHash = asg.snapshot_hash(m.reducer.store)
+let jrnl = journal.append_frames(journal.empty_journal("ws", "main.fard"), frames, reducerHash)
+
+// make_document
+let doc = vfs.make_document("ws", "main.fard", initialText)
+let a1 = core.assert_equal("doc initial version", doc.version, 0)
+let a2 = core.assert_equal("doc initial text", doc.text, initialText)
+
+// take_snapshot
+let doc_snap = vfs.take_snapshot(doc)
+let snap0 = vfs.get_snapshot(doc_snap, 0)?
+let a3 = core.assert_equal("snapshot version 0 text", snap0.text, initialText)
+
+// apply_frame_to_doc
+let doc1 = vfs.apply_frame_to_doc(doc, list.get(frames, 0))?
+let a4 = core.assert_equal("doc version after frame", doc1.version, list.get(frames, 0).frameId)
+
+// apply_frames_to_doc
+let doc_full = vfs.apply_frames_to_doc(doc, frames)?
+let a5 = core.assert_equal("doc text after all frames", doc_full.text, serverText)
+let a6 = core.assert_equal("doc version after all frames", doc_full.version, list.last(frames).frameId)
+
+// snapshots taken at each frame
+let snap1 = vfs.get_snapshot(doc_full, 1)?
+let a7 = core.assert_equal("snapshot 1 exists", snap1.version, 1)
+
+// missing snapshot fails
+let snap_bad = vfs.get_snapshot(doc_full, 999)
+let a8 = core.assert_equal("missing snapshot is err", snap_bad.t, "err")
+let a9 = core.assert_equal("missing snapshot error code", snap_bad.code, "SNAPSHOT_NOT_FOUND")
+
+// sync_from_journal
+let doc_synced = vfs.sync_from_journal(doc, jrnl, 0)?
+let a10 = core.assert_equal("synced doc text matches server", doc_synced.text, serverText)
+let a11 = core.assert_equal("synced doc version correct", doc_synced.version, list.last(frames).frameId)
+
+// document_hash determinism
+let h1 = vfs.document_hash(doc_full)
+let h2 = vfs.document_hash(doc_full)
+let a12 = core.assert_equal("document_hash deterministic", h1, h2)
+
+// sync produces same result as frame-by-frame
+let a13 = core.assert_equal("sync==frames text", doc_synced.text, doc_full.text)
+
+core.ok(core.test_summary("vfs", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13]))

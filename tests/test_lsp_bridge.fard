@@ -1,0 +1,72 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/lsp_bridge") as lsp
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let initialText = rr.projection.text
+let mach = frm.make_machine(rr, 3, 10)
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r")
+
+let m = frm.run_batches(mach, [tx1, tx2, tx3])?
+let frames = m.frames
+let serverText = m.reducer.projection.text
+
+// make_mirror
+let mirror = lsp.make_mirror("ws")
+let a1 = core.assert_equal("mirror workspace", mirror.workspaceId, "ws")
+
+// open_document
+let m1 = lsp.open_document(mirror, "main.fard", initialText)?
+let a2 = core.assert_equal("document opened", rec.has(m1.documents, "main.fard"), true)
+
+// get_document_text before sync
+let t0 = lsp.get_document_text(m1, "main.fard")?
+let a3 = core.assert_equal("initial text correct", t0, initialText)
+
+// sync_document
+let m2 = lsp.sync_document(m1, "main.fard", frames)?
+let t1 = lsp.get_document_text(m2, "main.fard")?
+let a4 = core.assert_equal("synced text matches server", t1, serverText)
+
+// get_document_version
+let v1 = lsp.get_document_version(m2, "main.fard")?
+let a5 = core.assert_equal("version after sync", v1, list.last(frames).frameId)
+
+// sync unopened document fails
+let bad_sync = lsp.sync_document(m1, "other.fard", frames)
+let a6 = core.assert_equal("sync unopened is err", bad_sync.t, "err")
+let a7 = core.assert_equal("sync unopened error code", bad_sync.code, "DOCUMENT_NOT_OPEN")
+
+// emit_diagnostics
+let diag = { message: "unused variable", line: 1, col: 3 }
+let m3 = lsp.emit_diagnostics(m2, "main.fard", [diag])?
+let d1 = lsp.get_diagnostics(m3, "main.fard")?
+let a8 = core.assert_equal("diagnostics emitted", list.len(d1), 1)
+let a9 = core.assert_equal("diagnostic message", list.get(d1, 0).message, "unused variable")
+
+// diagnostics on unopened file returns empty
+let d_none = lsp.get_diagnostics(m3, "missing.fard")?
+let a10 = core.assert_equal("missing file diagnostics empty", list.len(d_none), 0)
+
+// close_document
+let m4 = lsp.close_document(m3, "main.fard")?
+let after_close = lsp.get_document_text(m4, "main.fard")
+let a11 = core.assert_equal("closed document not accessible", after_close.t, "err")
+
+// sync determinism: two mirrors produce same text
+let ma = lsp.sync_document(lsp.open_document(lsp.make_mirror("ws"), "main.fard", initialText)?, "main.fard", frames)?
+let mb = lsp.sync_document(lsp.open_document(lsp.make_mirror("ws"), "main.fard", initialText)?, "main.fard", frames)?
+let ta = lsp.get_document_text(ma, "main.fard")?
+let tb = lsp.get_document_text(mb, "main.fard")?
+let a12 = core.assert_equal("mirror sync determinism", ta, tb)
+
+core.ok(core.test_summary("lsp_bridge", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12]))

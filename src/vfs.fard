@@ -1,0 +1,64 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./editor_bridge") as bridge
+import("./recovery") as recovery
+import("./journal") as journal
+
+// VFS document state: versioned text snapshot per file.
+fn make_document(workspaceId, fileId, initialText) {
+  {
+    workspaceId: workspaceId,
+    fileId: fileId,
+    version: 0,
+    text: initialText,
+    snapshots: {}
+  }
+}
+
+fn snapshot_key(version) { str.concat(["v", str.from(version)]) }
+
+fn take_snapshot(doc) {
+  let key = snapshot_key(doc.version) in
+  { ...doc, snapshots: rec.set(doc.snapshots, key, { version: doc.version, text: doc.text }) }
+}
+
+fn apply_frame_to_doc(doc, fr) {
+  let client = bridge.init(doc.workspaceId, doc.fileId, doc.text) in
+  if core.is_err(client) then client else
+  let c = { ...client.v, globalVersion: doc.version } in
+  let r = bridge.apply_frame(c, fr) in
+  if core.is_err(r) then r else
+  let newDoc = { ...doc, version: r.v.globalVersion, text: r.v.text } in
+  core.ok(take_snapshot(newDoc))
+}
+
+fn apply_frames_to_doc(doc, frames) {
+  list.fold(frames, core.ok(doc), fn(acc, fr) {
+    if core.is_err(acc) then acc else apply_frame_to_doc(acc.v, fr)
+  })
+}
+
+fn get_snapshot(doc, version) {
+  let key = snapshot_key(version) in
+  let snap = rec.get(doc.snapshots, key) in
+  if snap == null then core.err("SNAPSHOT_NOT_FOUND", { version: version }) else
+  core.ok(snap)
+}
+
+fn sync_from_journal(doc, jrnl, fromVersion) {
+  let client = bridge.init(doc.workspaceId, doc.fileId, doc.text) in
+  if core.is_err(client) then client else
+  let c = { ...client.v, globalVersion: doc.version } in
+  let r = recovery.replay_since(c, jrnl, fromVersion) in
+  if core.is_err(r) then r else
+  let newDoc = { ...doc, version: r.v.globalVersion, text: r.v.text } in
+  core.ok(take_snapshot(newDoc))
+}
+
+fn document_hash(doc) {
+  core.digest({ workspaceId: doc.workspaceId, fileId: doc.fileId, version: doc.version, text: doc.text })
+}
+
+export { make_document, take_snapshot, apply_frame_to_doc, apply_frames_to_doc, get_snapshot, sync_from_journal, document_hash }

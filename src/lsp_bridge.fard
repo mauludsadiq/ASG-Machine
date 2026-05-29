@@ -1,0 +1,63 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./vfs") as vfs
+
+// LSP mirror: tracks open documents and emits deterministic diagnostics.
+fn make_mirror(workspaceId) {
+  { workspaceId: workspaceId, documents: {}, diagnostics: {} }
+}
+
+fn open_document(mirror, fileId, initialText) {
+  let doc = vfs.make_document(mirror.workspaceId, fileId, initialText) in
+  let docs2 = rec.set(mirror.documents, fileId, doc) in
+  core.ok({ ...mirror, documents: docs2 })
+}
+
+fn sync_document(mirror, fileId, frames) {
+  let doc = rec.get(mirror.documents, fileId) in
+  if doc == null then core.err("DOCUMENT_NOT_OPEN", { fileId: fileId }) else
+  let r = vfs.apply_frames_to_doc(doc, frames) in
+  if core.is_err(r) then r else
+  let docs2 = rec.set(mirror.documents, fileId, r.v) in
+  core.ok({ ...mirror, documents: docs2 })
+}
+
+fn get_document_text(mirror, fileId) {
+  let doc = rec.get(mirror.documents, fileId) in
+  if doc == null then core.err("DOCUMENT_NOT_OPEN", { fileId: fileId }) else
+  core.ok(doc.text)
+}
+
+fn get_document_version(mirror, fileId) {
+  let doc = rec.get(mirror.documents, fileId) in
+  if doc == null then core.err("DOCUMENT_NOT_OPEN", { fileId: fileId }) else
+  core.ok(doc.version)
+}
+
+fn emit_diagnostics(mirror, fileId, diagnostics) {
+  let doc = rec.get(mirror.documents, fileId) in
+  if doc == null then core.err("DOCUMENT_NOT_OPEN", { fileId: fileId }) else
+  let entry = { fileId: fileId, version: doc.version, diagnostics: diagnostics } in
+  let diags2 = rec.set(mirror.diagnostics, fileId, entry) in
+  core.ok({ ...mirror, diagnostics: diags2 })
+}
+
+fn get_diagnostics(mirror, fileId) {
+  let entry = rec.get(mirror.diagnostics, fileId) in
+  if entry == null then core.ok([]) else
+  core.ok(entry.diagnostics)
+}
+
+fn close_document(mirror, fileId) {
+  let docs2 = rec.remove(mirror.documents, fileId) in
+  let diags2 = rec.remove(mirror.diagnostics, fileId) in
+  core.ok({ ...mirror, documents: docs2, diagnostics: diags2 })
+}
+
+fn mirror_hash(mirror) {
+  core.digest({ workspaceId: mirror.workspaceId, documentCount: list.len(rec.keys(mirror.documents)) })
+}
+
+export { make_mirror, open_document, sync_document, get_document_text, get_document_version, emit_diagnostics, get_diagnostics, close_document, mirror_hash }
