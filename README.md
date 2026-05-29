@@ -18,35 +18,53 @@ converge to identical text — provably, not probabilistically.
 FARD is a general-purpose deterministic functional language with a tree-walking
 interpreter (fardrun). This project implements the full ASG machine stack in FARD:
 store, reducer, projection, frame broadcast, client replay, HTTP/WS contracts,
-in-memory server, and a live HTTP server using std/net and std/mutex.
+in-memory server, live HTTP server, and durable persistence across restarts.
 
-## Run the Server
+## Run
 
-    fardrun run --program server.fard --out out/server_run
+    # Durable server (persists state across restarts)
+    mkdir -p data/server
+    fardrun run --program server_durable.fard --out out/server
 
-Server listens on port 7777. Run the smoke test:
+    # Stateless server (no persistence)
+    fardrun run --program server.fard --out out/server
 
+    # Smoke test (server must be running on port 7777)
     ./smoke.sh
 
-Expected output:
+    # Restart persistence test
+    ./restart_test.sh
 
-    GET /health    -> ok: True version: 0.6.0 workspaces: 1
+    # Fast test suite
+    fardrun run --program tests/run_all.fard --out out/tests_all
+
+    # E2E smoke test
+    fardrun run --program tests/test_e2e_smoke.fard --out out/t_smoke
+
+## Verified Behavior
+
+    ./smoke.sh output:
+    GET /health    -> ok: True version: 0.7.0 workspaces: 1
     POST /tx       -> status: ACCEPTED ingressSeq: 1
     POST /tx dup   -> status: DUPLICATE
     GET /frames    -> count: 2 headFrameId: 2
     GET /snapshot  -> version: 2 frameId: 2
     GET /frames?since=head -> count since head: 0
 
+    ./restart_test.sh output:
+    First boot:    tx1 ACCEPTED, snapshot v:1 text:main_v1
+    After restart: snapshot v:1 text:main_v1, frames:1 head:1
+
 ## Architecture
 
-    CLI submit
-    -> server.fard (net.serve + mutex state)
-    -> server_process.fard (route dispatch)
-    -> server.fard (multi-workspace manager)
-    -> request_router.fard (HTTP handler)
+    POST /tx
+    -> server_durable.fard (net.serve + mutex)
+    -> server_process.fard (route + parse)
+    -> server.fard (workspace manager)
+    -> request_router.fard (HTTP handlers)
     -> runtime.fard (gateway + log + consumer + bus + journal)
-    -> frame_bus / editor_bridge / editor_adapter
-    -> snapshot / workspace_format
+    -> workspace_state.fard (fs snapshot + journal persistence)
+    -> reducer / asg / projection / frame
 
 ## Modules
 
@@ -91,44 +109,34 @@ Expected output:
 
     Phase F — Live Server
     src/server_process.fard          HTTP route handler and query parser
-    server.fard                      net.serve entry point (port 7777, mutex state)
+    server.fard                      net.serve entry point (stateless)
     smoke.sh                         curl smoke test
+
+    Phase G — Durable Server
+    src/workspace_state.fard         fs snapshot + journal persistence
+    server_durable.fard              net.serve with disk persistence
+    restart_test.sh                  restart persistence smoke test
 
     main.fard                        batch demo
     tests/*.fard                     executable test programs
 
-## Test Suite
-
-    # Fast suite
-    fardrun run --program tests/run_all.fard --out out/tests_all
-
-    # E2E smoke
-    fardrun run --program tests/test_e2e_smoke.fard --out out/t_smoke
-
-    # Stress (~80s)
-    fardrun run --program tests/test_stress_convergence.fard --out out/t_stress
-
 ## Scale
 
-    4,903 lines of FARD across 72 files
-    607 invariant assertions
+    5,153 lines of FARD across 75 files
+    625 invariant assertions
     0 failures
 
-| Phase | Files | Key modules |
+| Phase | Modules | Purpose |
 |---|---|---|
-| A Correctness | 9 | asg, reducer, projection, rope, transactions |
-| B Client Runtime | 5 | editor_bridge, journal, recovery, vfs, lsp_bridge |
-| C Distributed | 7 | gateway, ordered_log, reducer_consumer, frame_bus, snapshot |
-| D Adapter Boundary | 5 | api_contract, ws_stream, cli_driver, editor_adapter |
+| A Correctness | 9 | ASG, reducer, projection, rope, transactions |
+| B Client Runtime | 5 | editor_bridge, journal, recovery, vfs, lsp |
+| C Distributed | 7 | gateway, log, consumer, bus, sim, partition, snapshot |
+| D Adapter Boundary | 5 | api_contract, ws_stream, cli, workspace_format, editor_adapter |
 | E Network Runtime | 3 | runtime, request_router, server |
 | F Live Server | 3 | server_process, server.fard, smoke.sh |
+| G Durable Server | 2 | workspace_state, server_durable.fard |
 
 ## Proof of Execution
-
-Live server smoke test:
-
-    ./smoke.sh  (server running on port 7777)
-    === PASS ===
 
 Fast suite:
 
@@ -139,3 +147,9 @@ E2E smoke:
 
     fard_run_digest=sha256:2fe090cd69a98f44266143fe903f7b30af9697172a76004b3e744ed4c69e062d
     { ok: true, passed: 26, failed: 0 }
+
+Restart persistence:
+
+    ./restart_test.sh
+    After restart: snapshot v:1 text:main_v1 frames:1 head:1
+    === DONE ===
