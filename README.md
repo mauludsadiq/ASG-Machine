@@ -29,6 +29,19 @@ cleanly. Every time. Provably.
     ./demo_adversarial.sh
     VERDICT: ASG_WINS
 
+## Quickstart
+
+    git clone https://github.com/mauludsadiq/ASG-Machine.git
+    cd ASG-Machine
+    docker compose up
+
+Server starts on port 7779. Then from the repo root:
+
+    ./demo_adversarial.sh   # VERDICT: ASG_WINS
+    ./demo_extended.sh      # three-way concurrency, failure mode, recovery
+
+No fardrun installation required.
+
 ## How It Works
 
 Every operation is a semantic transaction against a versioned AST:
