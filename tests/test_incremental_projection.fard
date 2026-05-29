@@ -1,0 +1,69 @@
+import("../src/asg") as asg
+import("../src/projection") as projection
+import("../src/incremental_projection") as incr
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let store = asg.sample_store()
+let p1 = projection.build_projection(store)?
+
+// compute_projection_spans returns offsets for all pnodes
+let spans = incr.compute_projection_spans(p1)
+let a1 = core.assert_equal("spans has root", rec.has(spans, "p_root"), true)
+let a2 = core.assert_equal("spans has fn_main", rec.has(spans, "p_fn_main"), true)
+let a3 = core.assert_equal("spans has stmt_1", rec.has(spans, "p_stmt_1"), true)
+let a4 = core.assert_equal("root starts at 0", rec.get(spans, "p_root"), 0)
+let a5 = core.assert_equal("fn_main starts at 0", rec.get(spans, "p_fn_main"), 0)
+
+// stmt_1 starts after fn prefix "fn main() {"
+let fn_prefix_len = core.text_len("fn main() {")
+let a6 = core.assert_equal("stmt_1 offset after fn prefix", rec.get(spans, "p_stmt_1"), fn_prefix_len)
+
+// rename stmt_1 emits local diff
+let store2 = asg.rename_node(store, "stmt_1", "y")?
+let p2 = projection.build_projection(store2)?
+let diff = incr.minimal_projection_diff(p1, p2, "stmt_1", "ws", "main.fard", 1, 1)?
+let a7 = core.assert_equal("rename diff start is local", diff.start, fn_prefix_len)
+let a8 = core.assert_equal("rename diff end is local", diff.end, fn_prefix_len + 12)
+let a9 = core.assert_equal("rename diff newText is stmt text", diff.newText, "  let y = 1
+")
+let a10 = core.assert_equal("rename diff smaller than full doc", diff.end - diff.start < core.text_len(p1.text), true)
+
+// set property on stmt_1 emits local diff
+let store3 = asg.set_property(store, "stmt_1", "value", "99")?
+let p3 = projection.build_projection(store3)?
+let diff3 = incr.minimal_projection_diff(p1, p3, "stmt_1", "ws", "main.fard", 1, 1)?
+let a11 = core.assert_equal("set_property diff is local", diff3.start, fn_prefix_len)
+
+// delete stmt_1 falls back to full diff (node gone from new projection)
+let store4 = asg.delete_node(store, "stmt_1")?
+let p4 = projection.build_projection(store4)?
+let diff4 = incr.minimal_projection_diff(p1, p4, "stmt_1", "ws", "main.fard", 1, 1)?
+let a12 = core.assert_equal("delete falls back to full diff start", diff4.start, 0)
+let a13 = core.assert_equal("delete falls back to full diff end", diff4.end, core.text_len(p1.text))
+
+// add child — target is parent fn_main
+let new_node = asg.make_node("new_e", "Expr", "expr", { text: "x * 2" }, [])
+let store5 = asg.add_node(store, "fn_main", new_node, 0)?
+let p5 = projection.build_projection(store5)?
+let diff5 = incr.minimal_projection_diff(p1, p5, "fn_main", "ws", "main.fard", 1, 1)?
+let a14 = core.assert_equal("add child diff covers fn_main span", diff5.start, 0)
+
+// unchanged subtree hashes preserved after rename of stmt_1
+let a15 = core.assert_equal("stmt_2 hash unchanged after stmt_1 rename",
+  rec.get(p1.nodes, "p_stmt_2").hash,
+  rec.get(p2.nodes, "p_stmt_2").hash
+)
+
+// offsets stable across rebuilds
+let spans2 = incr.compute_projection_spans(p1)
+let a16 = core.assert_equal("offsets deterministic", rec.get(spans, "p_stmt_1"), rec.get(spans2, "p_stmt_1"))
+
+// replayed minimal diffs converge
+import("../src/rope") as rope
+let r = rope.from_text(p1.text)
+let r2 = rope.replace_range(r, diff.start, diff.end, "p_stmt_1", diff.newText)?
+let a17 = core.assert_equal("minimal diff replay converges", rope.text(r2), p2.text)
+
+core.ok(core.test_summary("incremental_projection", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17]))

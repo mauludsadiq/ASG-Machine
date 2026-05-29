@@ -1,0 +1,62 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./asg") as asg
+import("./projection") as projection
+
+// Compute start offsets for every projection node by walking the tree.
+// Returns a record mapping pnode id -> startOffset within the full document.
+fn compute_offsets_rec(nodes, pnode_id, current_offset) {
+  let pnode = rec.get(nodes, pnode_id)
+  if pnode == null then rec.empty() else
+  let self_entry = rec.set({}, pnode_id, current_offset) in
+  let prefix_len = core.text_len(pnode.cachedText) in
+  let child_result = list.fold(pnode.childIds, { offset: current_offset + prefix_len, acc: {} }, fn(st, cid) {
+    let child_offsets = compute_offsets_rec(nodes, cid, st.offset) in
+    let child_pnode = rec.get(nodes, cid) in
+    let child_len = if child_pnode == null then 0 else child_pnode.length in
+    { offset: st.offset + child_len, acc: rec.merge(st.acc, child_offsets) }
+  }) in
+  rec.merge(self_entry, child_result.acc)
+}
+
+fn compute_projection_spans(projection) {
+  compute_offsets_rec(projection.nodes, projection.rootId, 0)
+}
+
+// Find the minimal span covering the changed subtree rooted at targetPnodeId.
+fn subtree_span(spans, nodes, target_pnode_id) {
+  let pnode = rec.get(nodes, target_pnode_id) in
+  if pnode == null then core.err("PNODE_NOT_FOUND", { id: target_pnode_id }) else
+  let start = rec.getOr(spans, target_pnode_id, 0) in
+  core.ok({ start: start, end: start + pnode.length })
+}
+
+// Compute minimal diff: only replace the span of the affected subtree.
+fn minimal_projection_diff(oldProjection, newProjection, targetAstNodeId, workspaceId, fileId, frameId, globalVersion) {
+  let target_pnode_id = str.concat(["p_", targetAstNodeId]) in
+  let old_spans = compute_projection_spans(oldProjection) in
+  let span_r = subtree_span(old_spans, oldProjection.nodes, target_pnode_id) in
+  if core.is_err(span_r) then
+    core.ok({ workspaceId: workspaceId, fileId: fileId, globalVersion: globalVersion, frameId: frameId, start: 0, end: core.text_len(oldProjection.text), newText: newProjection.text }) else
+  let span = span_r.v in
+  let new_pnode = rec.get(newProjection.nodes, target_pnode_id) in
+  if new_pnode == null then
+    core.ok({ workspaceId: workspaceId, fileId: fileId, globalVersion: globalVersion, frameId: frameId, start: 0, end: core.text_len(oldProjection.text), newText: newProjection.text }) else
+  core.ok({ workspaceId: workspaceId, fileId: fileId, globalVersion: globalVersion, frameId: frameId, start: span.start, end: span.end, newText: new_pnode.text })
+}
+
+// Check that unchanged subtrees have identical hashes between two projections.
+fn unchanged_hashes_preserved(oldProjection, newProjection, changedAstNodeId) {
+  let changed_pnode_id = str.concat(["p_", changedAstNodeId]) in
+  let old_ids = rec.keys(oldProjection.nodes) in
+  let unchanged = list.filter(old_ids, fn(pid) { pid != changed_pnode_id }) in
+  list.all(unchanged, fn(pid) {
+    let old_pnode = rec.get(oldProjection.nodes, pid) in
+    let new_pnode = rec.get(newProjection.nodes, pid) in
+    if new_pnode == null then true else old_pnode.hash == new_pnode.hash
+  })
+}
+
+export { compute_projection_spans, subtree_span, minimal_projection_diff, unchanged_hashes_preserved }
