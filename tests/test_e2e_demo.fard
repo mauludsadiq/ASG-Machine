@@ -1,0 +1,83 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/distributed_sim") as dsim
+import("../src/api_contract") as api
+import("../src/ws_stream") as ws
+import("../src/editor_adapter") as adapter
+import("../src/cli_driver") as cli
+import("../src/workspace_format") as wf
+import("../src/journal") as journal
+import("../src/snapshot") as snap
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+// D.6 — End-to-end demo
+// Simulates the full path: CLI submit -> gateway -> log -> reducer -> frame -> ws -> editor
+
+// 1. Boot workspace
+let store = asg.sample_store()
+let s0 = dsim.make_sim("ws", "main.fard", store)?
+let initialText = s0.initialText
+
+// 2. Open editor document
+let editor_doc = adapter.make_editor_doc("main.fard", initialText)
+let editor_sess = ws.make_session("editor_client")
+let editor_sess2 = ws.add_subscription(editor_sess, "ws", "main.fard", 0)?
+
+// 3. Submit transactions via CLI
+let cli_r1 = cli.run_cli(["submit", "--workspace=ws", "--id=tx1", "--op=rename", "--node=fn_main", "--value=main_v1"])?
+let cli_r2 = cli.run_cli(["submit", "--workspace=ws", "--id=tx2", "--op=set", "--node=stmt_1", "--key=value", "--value=42"])?
+let cli_r3 = cli.run_cli(["submit", "--workspace=ws", "--id=tx3", "--op=set", "--node=stmt_2", "--key=value", "--value=z"])?
+
+// 4. Validate via API contract
+let api_r1 = api.validate_post_tx_request({ id: cli_r1.submitted.id, workspaceId: cli_r1.submitted.workspaceId, dependencies: cli_r1.submitted.dependencies, preconditions: cli_r1.submitted.preconditions, operation: cli_r1.submitted.operation, lamportTimestamp: cli_r1.submitted.lamportTimestamp, replicaId: cli_r1.submitted.replicaId })?
+
+// 5. Ingest through pipeline
+let txs_list = [cli_r1.submitted, cli_r2.submitted, cli_r3.submitted]
+let s1 = dsim.add_client(s0, "editor_client")?
+let sf = dsim.run_full(s1, txs_list)?
+let serverText = dsim.server_text(sf)
+
+// 6. Receive frames via WebSocket
+let frames = sf.bus.frames
+let pending_msgs = ws.pending_frame_messages(editor_sess2, "ws", "main.fard", frames)
+
+// 7. Apply frames to editor document
+let final_doc = list.fold(pending_msgs, core.ok(editor_doc), fn(acc, msg) {
+    if core.is_err(acc) then acc else adapter.apply_frame_msg_to_doc(acc.v, msg)
+})?
+
+// 8. Check health via API
+let health = api.get_health_response("0.4.0", 1, if list.len(frames) > 0 then list.last(frames).frameId else 0)
+
+// 9. Take snapshot and build manifest
+let jrnl = sf.consumer.journal
+let machine_snap = snap.make_snapshot(sf.consumer.machine, jrnl)
+let manifest = wf.manifest_from_machine("ws", "main.fard", sf.consumer.machine, jrnl)
+let layout = wf.directory_layout("/data", "ws", machine_snap.version)
+
+// Assertions
+let a1 = core.assert_equal("CLI submits accepted", cli_r1.status, "QUEUED")
+let a2 = core.assert_equal("API validation passes", api_r1.id, "tx1")
+let a3 = core.assert_equal("server text non-empty", serverText == "", false)
+let a4 = core.assert_equal("frames produced", list.len(frames) > 0, true)
+let a5 = core.assert_equal("pending ws messages", list.len(pending_msgs) > 0, true)
+let a6 = core.assert_equal("editor text matches server", final_doc.text, serverText)
+let a7 = core.assert_equal("editor synced", final_doc.syncState, "SYNCED")
+let a8 = core.assert_equal("editor not dirty", final_doc.dirty, false)
+let a9 = core.assert_equal("health ok", health.ok, true)
+let a10 = core.assert_equal("snapshot version set", machine_snap.version > 0, true)
+let a11 = core.assert_equal("manifest version matches", manifest.version, sf.consumer.machine.reducer.globalVersion)
+let a12 = core.assert_equal("layout root correct", layout.root, "/data/ws")
+let a13 = core.assert_equal("journal entries present", list.len(jrnl.entries) > 0, true)
+let a14 = core.assert_equal("journal chain valid", journal.verify_chain(jrnl).t, "ok")
+let a15 = core.assert_equal("snapshot hash deterministic", snap.snapshot_hash(machine_snap), snap.snapshot_hash(machine_snap))
+
+// Full convergence proof
+let client_text = dsim.get_client_text(sf, "editor_client")?
+let a16 = core.assert_equal("bus client == server text", client_text, serverText)
+let a17 = core.assert_equal("editor == server text", final_doc.text, serverText)
+let a18 = core.assert_equal("editor == bus client", final_doc.text, client_text)
+
+core.ok(core.test_summary("e2e_demo", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18]))
