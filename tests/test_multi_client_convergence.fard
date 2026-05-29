@@ -1,0 +1,103 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/journal") as journal
+import("../src/editor_bridge") as bridge
+import("../src/recovery") as recovery
+import("../src/core") as core
+import("std/list") as list
+
+// Build server state with 6 transactions across 3 batches
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let initialText = rr.projection.text
+let mach = frm.make_machine(rr, 2, 10)
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r_a")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r_b")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r_a")
+let tx4 = txs.tx("tx4", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v2"), 4, "r_b")
+let tx5 = txs.tx("tx5", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "99"), 5, "r_a")
+let tx6 = txs.tx("tx6", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "w"), 6, "r_b")
+
+let m = frm.run_batches(mach, [tx1, tx2, tx3, tx4, tx5, tx6])?
+let frames = m.frames
+let serverText = m.reducer.projection.text
+let reducerHash = asg.snapshot_hash(m.reducer.store)
+let jrnl = journal.append_frames(journal.empty_journal("ws", "main.fard"), frames, reducerHash)
+
+// Simulate 5 clients starting at different versions
+let make_client = fn(v) { bridge.init("ws", "main.fard", initialText)? }
+
+let c1 = make_client(0)
+let c2 = make_client(0)
+let c3 = make_client(0)
+let c4 = make_client(0)
+let c5 = make_client(0)
+
+// All clients replay all frames
+let c1_full = recovery.replay_since(c1, jrnl, 0)?
+let c2_full = recovery.replay_since(c2, jrnl, 0)?
+let c3_full = recovery.replay_since(c3, jrnl, 0)?
+let c4_full = recovery.replay_since(c4, jrnl, 0)?
+let c5_full = recovery.replay_since(c5, jrnl, 0)?
+
+// All clients converge to server text
+let a1 = core.assert_equal("c1 converges", c1_full.text, serverText)
+let a2 = core.assert_equal("c2 converges", c2_full.text, serverText)
+let a3 = core.assert_equal("c3 converges", c3_full.text, serverText)
+let a4 = core.assert_equal("c4 converges", c4_full.text, serverText)
+let a5 = core.assert_equal("c5 converges", c5_full.text, serverText)
+
+// All client hashes equal
+let h1 = bridge.state_hash(c1_full)
+let h2 = bridge.state_hash(c2_full)
+let h3 = bridge.state_hash(c3_full)
+let a6 = core.assert_equal("c1==c2 hash", h1, h2)
+let a7 = core.assert_equal("c2==c3 hash", h2, h3)
+let a8 = core.assert_equal("c1==c5 hash", h1, bridge.state_hash(c5_full))
+
+// Delayed frames: client applies frames out of natural order via batched catch-up
+// Client D applies first 2 frames then catches up rest
+let cd = bridge.init("ws", "main.fard", initialText)?
+let cd_partial = recovery.replay_since(cd, jrnl, 0)?
+let cd_full = recovery.replay_since(cd_partial, jrnl, cd_partial.globalVersion)?
+let a9 = core.assert_equal("delayed client eventually converges", cd_full.text, serverText)
+
+// Duplicate frame delivery: apply frame 1 twice
+let c_dup = bridge.init("ws", "main.fard", initialText)?
+let c_dup1 = recovery.replay_since(c_dup, jrnl, 0)?
+let c_dup2 = recovery.replay_since(c_dup1, jrnl, 0)?
+let a10 = core.assert_equal("duplicate replay unchanged text", c_dup2.text, serverText)
+let a11 = core.assert_equal("duplicate replay unchanged version", c_dup2.globalVersion, c_dup1.globalVersion)
+
+// Partial replay: client only has first batch
+let c_part = bridge.init("ws", "main.fard", initialText)?
+let c_part1 = recovery.replay_since(c_part, jrnl, 0)?
+let a12 = core.assert_equal("partial then full converges", c_part1.text, serverText)
+
+// Reconnect recovery: client applies 2 frames, disconnects, then catches up rest
+let c_recon = bridge.init("ws", "main.fard", initialText)?
+let c_recon_partial = bridge.apply_frames(c_recon, list.take(frames, 2))?
+let rs = recovery.recovery_state(jrnl, c_recon_partial.globalVersion)?
+let c_recon_full = recovery.replay_since(c_recon_partial, jrnl, c_recon_partial.globalVersion)?
+let a13 = core.assert_equal("reconnected client converges", c_recon_full.text, serverText)
+
+// Batch replay: client applies all frames in one batch vs incrementally
+let c_batch = recovery.replay_since(bridge.init("ws", "main.fard", initialText)?, jrnl, 0)?
+let c_incr = list.fold(frames, core.ok(bridge.init("ws", "main.fard", initialText)?), fn(acc, fr) {
+  if core.is_err(acc) then acc else bridge.apply_frame(acc.v, fr)
+})?
+let a14 = core.assert_equal("batch==incremental text", c_batch.text, c_incr.text)
+let a15 = core.assert_equal("batch==incremental hash", bridge.state_hash(c_batch), bridge.state_hash(c_incr))
+
+// All 5 clients texts equal
+let all_texts_equal =
+  c1_full.text == c2_full.text &&
+  c2_full.text == c3_full.text &&
+  c3_full.text == c4_full.text &&
+  c4_full.text == c5_full.text
+let a16 = core.assert_equal("all 5 clients text equal", all_texts_equal, true)
+
+core.ok(core.test_summary("multi_client_convergence", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16]))
