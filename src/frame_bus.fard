@@ -1,0 +1,56 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./journal") as journal
+import("./editor_bridge") as bridge
+import("./recovery") as recovery
+
+fn empty_bus(workspaceId) {
+  { workspaceId: workspaceId, frames: [], subscribers: {} }
+}
+
+fn publish_frame(bus, fr) {
+  { ...bus, frames: list.concat([bus.frames, [fr]]) }
+}
+
+fn publish_frames(bus, frames) {
+  list.fold(frames, bus, fn(b, fr) { publish_frame(b, fr) })
+}
+
+fn subscribe(bus, clientId, initialText) {
+  let client = bridge.init(bus.workspaceId, "main.fard", initialText) in
+  if core.is_err(client) then client else
+  let subs2 = rec.set(bus.subscribers, clientId, client.v) in
+  core.ok({ ...bus, subscribers: subs2 })
+}
+
+fn frames_since(bus, fromFrameId) {
+  list.filter(bus.frames, fn(fr) { fr.frameId > fromFrameId })
+}
+
+fn deliver_to_subscriber(bus, clientId, fromFrameId) {
+  let client = rec.get(bus.subscribers, clientId) in
+  if client == null then core.err("SUBSCRIBER_NOT_FOUND", { clientId: clientId }) else
+  let pending = frames_since(bus, fromFrameId) in
+  let r = bridge.apply_frames(client, pending) in
+  if core.is_err(r) then r else
+  let subs2 = rec.set(bus.subscribers, clientId, r.v) in
+  core.ok({ bus: { ...bus, subscribers: subs2 }, client: r.v })
+}
+
+fn deliver_to_all(bus, fromFrameId) {
+  let clientIds = rec.keys(bus.subscribers) in
+  list.fold(clientIds, core.ok(bus), fn(acc, cid) {
+    if core.is_err(acc) then acc else
+    let r = deliver_to_subscriber(acc.v, cid, fromFrameId) in
+    if core.is_err(r) then r else core.ok(r.v.bus)
+  })
+}
+
+fn get_subscriber(bus, clientId) {
+  let client = rec.get(bus.subscribers, clientId) in
+  if client == null then core.err("SUBSCRIBER_NOT_FOUND", { clientId: clientId }) else
+  core.ok(client)
+}
+
+export { empty_bus, publish_frame, publish_frames, subscribe, frames_since, deliver_to_subscriber, deliver_to_all, get_subscriber }

@@ -1,0 +1,74 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/editor_bridge") as bridge
+import("../src/frame_bus") as bus
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let initialText = rr.projection.text
+let mach = frm.make_machine(rr, 3, 10)
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r")
+
+let m = frm.run_batches(mach, [tx1, tx2, tx3])?
+let frames = m.frames
+let serverText = m.reducer.projection.text
+
+// empty bus
+let b0 = bus.empty_bus("ws")
+let a1 = core.assert_equal("empty bus has no frames", list.len(b0.frames), 0)
+
+// publish frames
+let b1 = bus.publish_frames(b0, frames)
+let a2 = core.assert_equal("bus frame count after publish", list.len(b1.frames), list.len(frames))
+
+// subscribe client
+let b2 = bus.subscribe(b1, "client_a", initialText)?
+let a3 = core.assert_equal("subscriber registered", rec.has(b2.subscribers, "client_a"), true)
+
+// subscriber receives exact frame sequence
+let b3 = bus.deliver_to_subscriber(b2, "client_a", 0)?
+let ca = bus.get_subscriber(b3.bus, "client_a")?
+let a4 = core.assert_equal("subscriber text matches server", ca.text, serverText)
+let a5 = core.assert_equal("subscriber version correct", ca.globalVersion, list.last(frames).frameId)
+
+// frames_since works
+let since1 = bus.frames_since(b1, 1)
+let a6 = core.assert_equal("frames_since(1) count", list.len(since1), list.len(frames) - 1)
+let a7 = core.assert_equal("frames_since(0) all frames", list.len(bus.frames_since(b1, 0)), list.len(frames))
+
+// duplicate delivery ignored by editor_bridge
+let b4 = bus.deliver_to_subscriber(b3.bus, "client_a", 0)?
+let ca2 = bus.get_subscriber(b4.bus, "client_a")?
+let a8 = core.assert_equal("duplicate delivery text unchanged", ca2.text, serverText)
+let a9 = core.assert_equal("duplicate delivery version unchanged", ca2.globalVersion, ca.globalVersion)
+
+// catch-up after reconnect
+let b5 = bus.subscribe(b1, "client_b", initialText)?
+let b6 = bus.deliver_to_subscriber(b5, "client_b", 0)?
+let cb = bus.get_subscriber(b6.bus, "client_b")?
+let a10 = core.assert_equal("reconnect catch-up converges", cb.text, serverText)
+
+// deliver_to_all
+let b7 = bus.subscribe(b1, "c1", initialText)?
+let b8 = bus.subscribe(b7, "c2", initialText)?
+let b9 = bus.deliver_to_all(b8, 0)?
+let c1s = bus.get_subscriber(b9, "c1")?
+let c2s = bus.get_subscriber(b9, "c2")?
+let a11 = core.assert_equal("deliver_to_all c1 converges", c1s.text, serverText)
+let a12 = core.assert_equal("deliver_to_all c2 converges", c2s.text, serverText)
+let a13 = core.assert_equal("deliver_to_all c1==c2 hash", bridge.state_hash(c1s), bridge.state_hash(c2s))
+
+// missing subscriber rejected
+let bad = bus.deliver_to_subscriber(b1, "nobody", 0)
+let a14 = core.assert_equal("missing subscriber is err", bad.t, "err")
+let a15 = core.assert_equal("missing subscriber error code", bad.code, "SUBSCRIBER_NOT_FOUND")
+
+core.ok(core.test_summary("frame_bus", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15]))
