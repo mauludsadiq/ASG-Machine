@@ -1,0 +1,57 @@
+import("std/list") as list
+import("std/str") as str
+import("std/rec") as rec
+import("./core") as core
+
+// ACL: workspace roles and endpoint permissions.
+// Roles: owner > editor > viewer
+
+fn make_acl() { { grants: {} } }
+
+fn grant(acl, workspaceId, userId, role) {
+  let valid = ["owner", "editor", "viewer"] in
+  if !list.any(valid, fn(r) { r == role }) then
+    core.err("INVALID_ROLE", { role: role }) else
+  let key = str.concat([workspaceId, ":", userId]) in
+  core.ok({ ...acl, grants: rec.set(acl.grants, key, role) })
+}
+
+fn revoke(acl, workspaceId, userId) {
+  let key = str.concat([workspaceId, ":", userId]) in
+  core.ok({ ...acl, grants: rec.remove(acl.grants, key) })
+}
+
+fn get_role(acl, workspaceId, userId) {
+  let key = str.concat([workspaceId, ":", userId]) in
+  rec.getOr(acl.grants, key, "none")
+}
+
+fn can_submit_tx(acl, workspaceId, userId) {
+  let role = get_role(acl, workspaceId, userId) in
+  role == "owner" || role == "editor"
+}
+
+fn can_read(acl, workspaceId, userId) {
+  let role = get_role(acl, workspaceId, userId) in
+  role == "owner" || role == "editor" || role == "viewer"
+}
+
+fn can_admin(acl, workspaceId, userId) {
+  get_role(acl, workspaceId, userId) == "owner"
+}
+
+fn check_submit(acl, workspaceId, userId) {
+  if can_submit_tx(acl, workspaceId, userId) then core.ok(true) else
+  core.err("PERMISSION_DENIED", { required: "editor", userId: userId, workspaceId: workspaceId })
+}
+
+fn check_read(acl, workspaceId, userId) {
+  if can_read(acl, workspaceId, userId) then core.ok(true) else
+  core.err("PERMISSION_DENIED", { required: "viewer", userId: userId, workspaceId: workspaceId })
+}
+
+fn acl_hash(acl) {
+  core.digest({ grantCount: list.len(rec.keys(acl.grants)) })
+}
+
+export { make_acl, grant, revoke, get_role, can_submit_tx, can_read, can_admin, check_submit, check_read, acl_hash }

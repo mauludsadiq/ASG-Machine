@@ -1,0 +1,87 @@
+import("std/str") as str
+import("std/rec") as rec
+import("std/list") as list
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/runtime") as rt
+import("../src/server") as srv
+import("../src/server_process") as sp
+import("../src/identity") as identity
+import("../src/acl") as acl_mod
+import("../src/server_auth") as sauth
+import("../src/core") as core
+
+let secret = "server_secret_xyz"
+let store = asg.sample_store()
+
+// Boot server and auth
+let srv0 = srv.create_workspace(srv.empty_server("0.8.0"), "ws", "main.fard", store)?
+let auth0 = sauth.make_auth_server(secret)
+let auth1 = sauth.auth_grant(auth0, "ws", "alice", "owner")?
+let auth2 = sauth.auth_grant(auth1, "ws", "bob", "editor")?
+let auth3 = sauth.auth_grant(auth2, "ws", "carol", "viewer")?
+
+// Tokens
+let tok_alice = identity.make_token("alice", "client_a", secret)
+let tok_bob = identity.make_token("bob", "client_b", secret)
+let tok_carol = identity.make_token("carol", "client_c", secret)
+let tok_dave = identity.make_token("dave", "client_d", secret)
+
+fn make_req(method, path, body_str, token, nonce) {
+  { method: method, path: path, body: body_str, headers: { authorization: str.concat(["Bearer ", token]), "x-nonce": nonce } }
+}
+
+let tx_body = core.stable_json({ id: "tx1", workspaceId: "ws", dependencies: [], preconditions: [], operation: txs.op_rename("fn_main", "main_v1"), lamportTimestamp: 1, replicaId: "cli" })
+
+// owner can submit tx
+let r1 = sauth.handle_authenticated(auth3, srv0, make_req("POST", "/tx", tx_body, tok_alice.token, "n001"))?
+let a1 = core.assert_equal("owner submit 201", r1.response.status, 201)
+
+// editor can submit tx
+let r2 = sauth.handle_authenticated(auth3, srv0, make_req("POST", "/tx", tx_body, tok_bob.token, "n002"))?
+let a2 = core.assert_equal("editor submit 201", r2.response.status, 201)
+
+// viewer cannot submit tx
+let r3 = sauth.handle_authenticated(auth3, srv0, make_req("POST", "/tx", tx_body, tok_carol.token, "n003"))?
+let a3 = core.assert_equal("viewer submit 403", r3.response.status, 403)
+
+// ungranted user cannot submit
+let r4 = sauth.handle_authenticated(auth3, srv0, make_req("POST", "/tx", tx_body, tok_dave.token, "n004"))?
+let a4 = core.assert_equal("ungranted submit 403", r4.response.status, 403)
+
+// unauthenticated rejected
+let r5 = sauth.handle_authenticated(auth3, srv0, { method: "POST", path: "/tx", body: tx_body, headers: rec.empty() })?
+let a5 = core.assert_equal("unauthenticated 401", r5.response.status, 401)
+
+// bad token rejected
+let r6 = sauth.handle_authenticated(auth3, srv0, make_req("POST", "/tx", tx_body, "bad.token.sig", "n005"))?
+let a6 = core.assert_equal("bad token 401", r6.response.status, 401)
+
+// replayed nonce rejected
+let r7 = sauth.handle_authenticated(auth3, srv0, make_req("POST", "/tx", tx_body, tok_alice.token, "n006"))?
+let auth_after_n006 = r7.auth_server
+let r8 = sauth.handle_authenticated(auth_after_n006, srv0, make_req("POST", "/tx", tx_body, tok_alice.token, "n006"))?
+let a7 = core.assert_equal("first nonce ok", r7.response.status, 201)
+let a8 = core.assert_equal("replayed nonce 409", r8.response.status, 409)
+
+// viewer can read frames
+let r9 = sauth.handle_authenticated(auth3, srv0, make_req("GET", "/frames?workspaceId=ws&since=0", "", tok_carol.token, "n007"))?
+let a9 = core.assert_equal("viewer read frames 200", r9.response.status, 200)
+
+// viewer can read snapshot
+let r10 = sauth.handle_authenticated(auth3, srv0, make_req("GET", "/snapshot?workspaceId=ws", "", tok_carol.token, "n008"))?
+let a10 = core.assert_equal("viewer read snapshot 200", r10.response.status, 200)
+
+// health is public (no auth required)
+let r11 = sauth.handle_authenticated(auth3, srv0, { method: "GET", path: "/health", body: "", headers: rec.empty() })?
+let a11 = core.assert_equal("health public 200", r11.response.status, 200)
+
+// workspace isolation: alice has no access to ws2
+let r12 = sauth.handle_authenticated(auth3, srv0, make_req("GET", "/frames?workspaceId=ws2&since=0", "", tok_alice.token, "n009"))?
+let a12 = core.assert_equal("alice no access to ws2 403", r12.response.status, 403)
+
+// missing nonce rejected
+let r13 = sauth.handle_authenticated(auth3, srv0, { method: "POST", path: "/tx", body: tx_body, headers: { authorization: str.concat(["Bearer ", tok_alice.token]) } })?
+let a13 = core.assert_equal("missing nonce 400", r13.response.status, 400)
+
+core.ok(core.test_summary("server_auth", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13]))

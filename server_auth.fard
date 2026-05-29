@@ -1,0 +1,82 @@
+import("std/net") as net
+import("std/json") as json
+import("std/mutex") as mutex
+import("std/rec") as rec
+import("./src/core") as core
+import("./src/asg") as asg
+import("./src/reducer") as reducer
+import("./src/frame") as frm
+import("./src/journal") as journal
+import("./src/gateway") as gateway
+import("./src/ordered_log") as olog
+import("./src/reducer_consumer") as rc
+import("./src/frame_bus") as fbus
+import("./src/server") as srv
+import("./src/server_process") as sp
+import("./src/server_auth") as sauth
+import("./src/identity") as identity
+import("./src/workspace_state") as ws_state
+
+let DATA_DIR = "data/server_auth"
+let WS_ID = "ws"
+let FILE_ID = "main.fard"
+let SECRET = "asg_machine_secret_v1"
+
+fn boot_server() {
+  if !ws_state.has_saved_state(DATA_DIR, WS_ID) then
+    let store = asg.sample_store() in
+    srv.create_workspace(srv.empty_server("0.8.0"), WS_ID, FILE_ID, store) else
+  let snap_r = ws_state.load_snapshot(DATA_DIR, WS_ID) in
+  if core.is_err(snap_r) then
+    let store = asg.sample_store() in
+    srv.create_workspace(srv.empty_server("0.8.0"), WS_ID, FILE_ID, store) else
+  let jrnl_r = ws_state.load_journal(DATA_DIR, WS_ID) in
+  let jrnl = if core.is_err(jrnl_r) then journal.empty_journal(WS_ID, FILE_ID) else jrnl_r.v in
+  let rr = reducer.init(WS_ID, FILE_ID, snap_r.v.store) in
+  if core.is_err(rr) then
+    let store = asg.sample_store() in
+    srv.create_workspace(srv.empty_server("0.8.0"), WS_ID, FILE_ID, store) else
+  let rr2 = { ...rr.v, globalVersion: snap_r.v.version } in
+  let mach0 = frm.make_machine(rr2, 10, 0) in
+  let snap_frame_id = rec.getOr(snap_r.v, "frameId", 0) in
+  let mach = { ...mach0, frameId: snap_frame_id } in
+  let g = gateway.empty_gateway(WS_ID) in
+  let log = olog.empty_log(WS_ID) in
+  let consumer = rc.make_consumer(WS_ID, "runtime", mach, jrnl) in
+  let bus = { ...fbus.empty_bus(WS_ID), fileId: FILE_ID } in
+  let loaded_rt = { workspaceId: WS_ID, fileId: FILE_ID, gateway: g, log: log, consumer: consumer, bus: bus } in
+  let s = srv.empty_server("0.8.0") in
+  core.ok({ ...s, workspaces: rec.set(s.workspaces, WS_ID, loaded_rt) })
+}
+
+fn boot_auth() {
+  let auth0 = sauth.make_auth_server(SECRET) in
+  let auth1 = sauth.auth_grant(auth0, WS_ID, "alice", "owner") in
+  let a1 = if core.is_err(auth1) then auth0 else auth1.v in
+  let auth2 = sauth.auth_grant(a1, WS_ID, "bob", "editor") in
+  let a2 = if core.is_err(auth2) then a1 else auth2.v in
+  let auth3 = sauth.auth_grant(a2, WS_ID, "carol", "viewer") in
+  if core.is_err(auth3) then a2 else auth3.v
+}
+
+let boot = boot_server()
+let initial_server = if core.is_err(boot) then srv.empty_server("0.8.0") else boot.v
+let initial_auth = boot_auth()
+
+let state = mutex.new({ srv: initial_server, auth: initial_auth })
+
+net.serve(7778, fn(req) {
+  let current = mutex.lock(state) in
+  let result = sauth.handle_authenticated(current.auth, current.srv, req) in
+  if core.is_err(result) then
+    let _ = mutex.unlock(state, current) in
+    { status: 500, headers: {}, body: json.encode({ error: "INTERNAL_ERROR" }) } else
+  let r = result.v in
+  let new_state = { srv: r.srv_state, auth: r.auth_server } in
+  let _ = mutex.unlock(state, new_state) in
+  let ws = rec.get(new_state.srv.workspaces, WS_ID) in
+  let _ = if ws != null && req.method == "POST" then
+    ws_state.save_runtime(DATA_DIR, WS_ID, FILE_ID, ws)
+  else null in
+  { status: r.response.status, headers: r.response.headers, body: r.response.body }
+})

@@ -1,0 +1,68 @@
+import("std/json") as json
+import("std/rec") as rec
+import("std/str") as str
+import("std/list") as list
+import("./core") as core
+import("./identity") as identity
+import("./acl") as acl_mod
+import("./signed_request") as sreq
+import("./server_process") as sp
+
+// Auth-wrapped server: validates token + ACL before dispatching.
+
+fn make_auth_server(secret) {
+  { secret: secret, acl: acl_mod.make_acl(), nonceStore: identity.make_nonce_store() }
+}
+
+fn auth_grant(auth_server, workspaceId, userId, role) {
+  let r = acl_mod.grant(auth_server.acl, workspaceId, userId, role) in
+  if core.is_err(r) then r else
+  core.ok({ ...auth_server, acl: r.v })
+}
+
+fn auth_error(status, code, message) {
+  { status: status, body: { error: code, message: message }, headers: { "Content-Type": "application/json" } }
+}
+
+fn handle_authenticated(auth_server, srv_state, req) {
+  let parsed = sp.parse_path(req.path) in
+  let path = parsed.path in
+  let method = req.method in
+  let headers = req.headers in
+  let query = parsed.query in
+  let body = if method == "POST" then
+    let b = json.decode(req.body) in
+    if b == null then rec.empty() else b
+  else rec.empty() in
+  let workspaceId = rec.getOr(query, "workspaceId", rec.getOr(body, "workspaceId", "")) in
+  if path == "/health" then
+    let r = sp.handle(srv_state, req) in
+    let resp0 = r.response in
+    let norm0 = { status: if rec.has(resp0, "status") then resp0.status else resp0.httpStatus, body: resp0.body, headers: rec.getOr(resp0, "headers", rec.empty()) } in
+    core.ok({ auth_server: auth_server, srv_state: r.server, response: norm0 }) else
+  let token_r = sreq.extract_auth(headers) in
+  if core.is_err(token_r) then
+    core.ok({ auth_server: auth_server, srv_state: srv_state, response: auth_error(401, "MISSING_TOKEN", "Authorization header required") }) else
+  let nonce = rec.getOr(headers, "x-nonce", rec.getOr(body, "nonce", "")) in
+  if nonce == "" then
+    core.ok({ auth_server: auth_server, srv_state: srv_state, response: auth_error(400, "MISSING_NONCE", "x-nonce header required") }) else
+  let verify_r = sreq.verify_signed_request({ token: token_r.v, nonce: nonce }, auth_server.secret, auth_server.nonceStore) in
+  if core.is_err(verify_r) then
+    let code = verify_r.code in
+    let status = if code == "NONCE_REPLAYED" then 409 else 401 in
+    core.ok({ auth_server: auth_server, srv_state: srv_state, response: auth_error(status, code, "auth failed") }) else
+  let userId = verify_r.v.userId in
+  let new_nonce_store = verify_r.v.nonceStore in
+  let auth2 = { ...auth_server, nonceStore: new_nonce_store } in
+  let perm_r =
+    if method == "POST" && path == "/tx" then acl_mod.check_submit(auth2.acl, workspaceId, userId) else
+    acl_mod.check_read(auth2.acl, workspaceId, userId) in
+  if core.is_err(perm_r) then
+    core.ok({ auth_server: auth2, srv_state: srv_state, response: auth_error(403, perm_r.code, perm_r.data.required) }) else
+  let r = sp.handle(srv_state, req) in
+  let resp = r.response in
+  let normalized = { status: if rec.has(resp, "status") then resp.status else resp.httpStatus, body: resp.body, headers: rec.getOr(resp, "headers", rec.empty()) } in
+  core.ok({ auth_server: auth2, srv_state: r.server, response: normalized })
+}
+
+export { make_auth_server, auth_grant, handle_authenticated, auth_error }

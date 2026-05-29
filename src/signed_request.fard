@@ -1,0 +1,41 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./identity") as identity
+
+// Signed request: canonical digest, nonce, replay rejection.
+
+fn canonical_request(method, path, body_str, nonce, userId) {
+  core.digest({ method: method, path: path, body: body_str, nonce: nonce, userId: userId })
+}
+
+fn make_signed_request(method, path, body_str, nonce, token, secret) {
+  let validated = identity.validate_token(token, secret) in
+  if core.is_err(validated) then validated else
+  let userId = validated.v.userId in
+  let digest = canonical_request(method, path, body_str, nonce, userId) in
+  core.ok({ method: method, path: path, body: body_str, nonce: nonce, token: token, userId: userId, digest: digest })
+}
+
+fn verify_signed_request(req, secret, nonceStore) {
+  if !rec.has(req, "token") then core.err("MISSING_TOKEN", {}) else
+  if !rec.has(req, "nonce") then core.err("MISSING_NONCE", {}) else
+  let validated = identity.validate_token(req.token, secret) in
+  if core.is_err(validated) then validated else
+  let userId = validated.v.userId in
+  let nonce_r = identity.check_and_record_nonce(nonceStore, req.nonce) in
+  if core.is_err(nonce_r) then nonce_r else
+  core.ok({ userId: userId, clientId: validated.v.clientId, nonceStore: nonce_r.v })
+}
+
+fn extract_auth(headers) {
+  let auth = rec.getOr(headers, "authorization", "") in
+  if auth == "" then core.err("MISSING_AUTH_HEADER", {}) else
+  let parts = str.split(auth, " ") in
+  if list.len(parts) != 2 then core.err("INVALID_AUTH_HEADER", { header: auth }) else
+  if list.get(parts, 0) != "Bearer" then core.err("INVALID_AUTH_SCHEME", { scheme: list.get(parts, 0) }) else
+  core.ok(list.get(parts, 1))
+}
+
+export { canonical_request, make_signed_request, verify_signed_request, extract_auth }

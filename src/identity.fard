@@ -1,0 +1,45 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+
+// Identity: users, clients, session tokens.
+
+fn make_user(userId, displayName) {
+  { userId: userId, displayName: displayName, createdAt: core.digest({ userId: userId }) }
+}
+
+fn make_client(clientId, userId, replicaId) {
+  { clientId: clientId, userId: userId, replicaId: replicaId }
+}
+
+fn make_token(userId, clientId, secret) {
+  let payload = { userId: userId, clientId: clientId } in
+  let sig = core.digest({ payload: payload, secret: secret }) in
+  { userId: userId, clientId: clientId, sig: sig, token: str.concat([userId, ".", clientId, ".", sig]) }
+}
+
+fn parse_token(raw) {
+  let parts = str.split(raw, ".") in
+  if list.len(parts) != 3 then core.err("INVALID_TOKEN_FORMAT", { raw: raw }) else
+  core.ok({ userId: list.get(parts, 0), clientId: list.get(parts, 1), sig: list.get(parts, 2) })
+}
+
+fn validate_token(raw, secret) {
+  let parsed = parse_token(raw) in
+  if core.is_err(parsed) then parsed else
+  let p = parsed.v in
+  let expected_sig = core.digest({ payload: { userId: p.userId, clientId: p.clientId }, secret: secret }) in
+  if p.sig != expected_sig then core.err("INVALID_TOKEN_SIG", { userId: p.userId }) else
+  core.ok(p)
+}
+
+fn make_nonce_store() { {} }
+
+fn check_and_record_nonce(store, nonce) {
+  if rec.has(store, nonce) then
+    core.err("NONCE_REPLAYED", { nonce: nonce }) else
+  core.ok(rec.set(store, nonce, true))
+}
+
+export { make_user, make_client, make_token, parse_token, validate_token, make_nonce_store, check_and_record_nonce }

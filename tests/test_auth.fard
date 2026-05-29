@@ -1,0 +1,99 @@
+import("std/str") as str
+import("../src/identity") as identity
+import("../src/acl") as acl_mod
+import("../src/signed_request") as sreq
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let secret = "test_secret_abc"
+
+// make_user / make_client
+let user_alice = identity.make_user("alice", "Alice")
+let user_bob = identity.make_user("bob", "Bob")
+let client_a = identity.make_client("client_a", "alice", "replica_a")
+let a1 = core.assert_equal("user userId", user_alice.userId, "alice")
+let a2 = core.assert_equal("client userId", client_a.userId, "alice")
+
+// make_token / validate_token
+let tok_alice = identity.make_token("alice", "client_a", secret)
+let a3 = core.assert_equal("token contains userId", tok_alice.userId, "alice")
+let v1 = identity.validate_token(tok_alice.token, secret)?
+let a4 = core.assert_equal("valid token userId", v1.userId, "alice")
+let a5 = core.assert_equal("valid token clientId", v1.clientId, "client_a")
+
+// bad token rejected
+let bad_tok = identity.validate_token("alice.client_a.badsig", secret)
+let a6 = core.assert_equal("bad token is err", bad_tok.t, "err")
+let a7 = core.assert_equal("bad token code", bad_tok.code, "INVALID_TOKEN_SIG")
+
+// malformed token rejected
+let mal_tok = identity.validate_token("notavalidtoken", secret)
+let a8 = core.assert_equal("malformed token is err", mal_tok.t, "err")
+let a9 = core.assert_equal("malformed token code", mal_tok.code, "INVALID_TOKEN_FORMAT")
+
+// nonce replay rejection
+let ns0 = identity.make_nonce_store()
+let ns1 = identity.check_and_record_nonce(ns0, "nonce_1")?
+let a10 = core.assert_equal("first nonce ok", rec.has(ns1, "nonce_1"), true)
+let replay = identity.check_and_record_nonce(ns1, "nonce_1")
+let a11 = core.assert_equal("replayed nonce is err", replay.t, "err")
+let a12 = core.assert_equal("replayed nonce code", replay.code, "NONCE_REPLAYED")
+
+// ACL: grant roles
+let acl0 = acl_mod.make_acl()
+let acl1 = acl_mod.grant(acl0, "ws", "alice", "owner")?
+let acl2 = acl_mod.grant(acl1, "ws", "bob", "editor")?
+let acl3 = acl_mod.grant(acl2, "ws", "carol", "viewer")?
+
+let a13 = core.assert_equal("owner can submit", acl_mod.can_submit_tx(acl3, "ws", "alice"), true)
+let a14 = core.assert_equal("editor can submit", acl_mod.can_submit_tx(acl3, "ws", "bob"), true)
+let a15 = core.assert_equal("viewer cannot submit", acl_mod.can_submit_tx(acl3, "ws", "carol"), false)
+let a16 = core.assert_equal("ungranted cannot submit", acl_mod.can_submit_tx(acl3, "ws", "dave"), false)
+
+let a17 = core.assert_equal("owner can read", acl_mod.can_read(acl3, "ws", "alice"), true)
+let a18 = core.assert_equal("viewer can read", acl_mod.can_read(acl3, "ws", "carol"), true)
+let a19 = core.assert_equal("ungranted cannot read", acl_mod.can_read(acl3, "ws", "dave"), false)
+
+let a20 = core.assert_equal("owner can admin", acl_mod.can_admin(acl3, "ws", "alice"), true)
+let a21 = core.assert_equal("editor cannot admin", acl_mod.can_admin(acl3, "ws", "bob"), false)
+
+// invalid role rejected
+let bad_role = acl_mod.grant(acl0, "ws", "alice", "superuser")
+let a22 = core.assert_equal("invalid role is err", bad_role.t, "err")
+
+// revoke
+let acl4 = acl_mod.revoke(acl3, "ws", "bob")?
+let a23 = core.assert_equal("revoked user cannot submit", acl_mod.can_submit_tx(acl4, "ws", "bob"), false)
+
+// workspace isolation
+let a24 = core.assert_equal("alice has no role in ws2", acl_mod.can_read(acl3, "ws2", "alice"), false)
+
+// check_submit / check_read errors
+let cs = acl_mod.check_submit(acl3, "ws", "carol")
+let a25 = core.assert_equal("check_submit viewer is err", cs.t, "err")
+let a26 = core.assert_equal("check_submit code", cs.code, "PERMISSION_DENIED")
+
+// extract_auth
+let good_headers = { authorization: str.concat(["Bearer ", tok_alice.token]) }
+let ea = sreq.extract_auth(good_headers)?
+let a27 = core.assert_equal("extract_auth returns token", ea, tok_alice.token)
+let bad_headers = { authorization: "Basic abc" }
+let ea_bad = sreq.extract_auth(bad_headers)
+let a28 = core.assert_equal("bad scheme is err", ea_bad.t, "err")
+let no_headers = rec.empty()
+let ea_none = sreq.extract_auth(no_headers)
+let a29 = core.assert_equal("missing auth is err", ea_none.t, "err")
+
+// verify_signed_request
+let vsr = sreq.verify_signed_request({ token: tok_alice.token, nonce: "n001" }, secret, ns0)?
+let a30 = core.assert_equal("verify userId", vsr.userId, "alice")
+let a31 = core.assert_equal("verify nonce recorded", rec.has(vsr.nonceStore, "n001"), true)
+
+// replay rejection via verify
+let ns_used = vsr.nonceStore
+let replay2 = sreq.verify_signed_request({ token: tok_alice.token, nonce: "n001" }, secret, ns_used)
+let a32 = core.assert_equal("verify replay rejected", replay2.t, "err")
+let a33 = core.assert_equal("verify replay code", replay2.code, "NONCE_REPLAYED")
+
+core.ok(core.test_summary("auth", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32, a33]))
