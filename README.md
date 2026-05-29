@@ -17,9 +17,8 @@ converge to identical text — provably, not probabilistically.
 
 FARD is a general-purpose deterministic functional language with a tree-walking
 interpreter (fardrun). This project uses FARD to implement the full ASG machine
-stack: store, reducer, projection, frame broadcast, and client replay. All
-execution is deterministic and content-addressed — every run produces a
-cryptographic receipt tying inputs to outputs.
+stack: store, reducer, projection, frame broadcast, client replay, and external
+adapter contracts. All execution is deterministic and content-addressed.
 
 ## Architecture
 
@@ -28,10 +27,10 @@ cryptographic receipt tying inputs to outputs.
     -> ordered log (total order)
     -> reducer consumer (deterministic frames)
     -> frame bus (broadcast)
-    -> editor bridge clients (replay)
-    -> journal (persistence)
-    -> recovery (catch-up)
-    -> VFS / LSP mirrors
+    -> WebSocket session (delivery tracking)
+    -> editor adapter (diff apply, cursor, sync state)
+    -> journal (persistence) / recovery (catch-up)
+    -> VFS / LSP mirrors / snapshot / workspace directory
 
 ## Modules
 
@@ -62,6 +61,13 @@ cryptographic receipt tying inputs to outputs.
     src/partition.fard               workspace isolation and routing
     src/snapshot.fard                durable ASG + projection snapshots
 
+    Phase D — Production Adapter Boundary
+    src/api_contract.fard            HTTP API payload validation and response shaping
+    src/ws_stream.fard               WebSocket/long-poll frame stream protocol
+    src/cli_driver.fard              CLI command parsing and dispatch
+    src/workspace_format.fard        persisted workspace directory format
+    src/editor_adapter.fard          browser/editor adapter spec
+
     main.fard                        executable demo
     tests/*.fard                     executable test programs
 
@@ -76,10 +82,13 @@ cryptographic receipt tying inputs to outputs.
     # Stress convergence suite (~80s)
     fardrun run --program tests/test_stress_convergence.fard --out out/t_stress
 
+    # End-to-end demo
+    fardrun run --program tests/test_e2e_demo.fard --out out/t_e2e
+
 ## Scale
 
-    3,239 lines of FARD across 52 files
-    353 invariant assertions
+    4,219 lines of FARD across 63 files
+    511 invariant assertions
     0 failures
 
 ## Test Suite
@@ -125,6 +134,17 @@ Phase C:
 | test_partition.fard | 8 | workspace isolation, routing, wrong-ws rejection |
 | test_snapshot.fard | 12 | hash determinism, corrupt rejection, restore, suffix replay |
 
+Phase D:
+
+| File | Assertions | Coverage |
+|---|---|---|
+| test_api_contract.fard | 30 | POST /tx, GET /frames/snapshot/health, route() |
+| test_ws_stream.fard | 32 | message shapes, session, subscribe, deliver, pending |
+| test_cli_driver.fard | 30 | parse_args, parse_flags, submit/frames/snapshot/health |
+| test_workspace_format.fard | 21 | paths, manifest, verify, manifest_from_machine |
+| test_editor_adapter.fard | 27 | sync states, diff apply, cursor, handshake, doc_hash |
+| test_e2e_demo.fard | 18 | full pipeline: CLI->gateway->reducer->frame->editor |
+
 Infrastructure:
 
 | File | Assertions | Coverage |
@@ -136,45 +156,41 @@ Infrastructure:
 
 ## Documented Behaviors
 
-**Failure semantics:**
+**Failure semantics:** rename-after-delete => FAILED, kind mismatch => FAILED,
+missing dependency => PENDING (auto-retried), duplicate tx => DUPLICATE.
 
-- rename-after-delete => FAILED
-- kind mismatch => FAILED
-- missing dependency => PENDING (auto-retried when dependency arrives)
-- duplicate tx id => DUPLICATE (idempotent, state unchanged)
+**Editor bridge:** STALE_FRAME if frameId <= clientVersion, FRAME_GAP if
+frameId != clientVersion + 1. Duplicates silently skipped.
 
-**Editor bridge frame tracking:**
+**Incremental diffs:** minimal_projection_diff() covers only the affected subtree.
+Falls back to full-document on delete or missing node.
 
-Frames tracked by frameId. STALE_FRAME if frameId <= clientVersion.
-FRAME_GAP if frameId != clientVersion + 1. Duplicates silently skipped.
+**Journal:** prevFrameHash chaining. verify_chain() detects broken sequences
+and tampering. replay_journal() reconstructs text from entries alone.
 
-**Incremental projection diffs:**
+**Gateway:** validates shape, checks workspaceId, deduplicates by tx.id,
+assigns monotonic ingressSeq. Wrong-workspace txs marked REJECTED.
 
-minimal_projection_diff() emits a diff covering only the affected subtree span.
-Falls back to full-document replacement when target node deleted or not found.
+**Workspace partitions:** isolated gateway/log/consumer/journal/bus per workspace.
+Same tx.id allowed in different workspaces.
 
-**Replay journal:**
+**Snapshots:** snapshotHash covers version/frameId/asgHash/projectionHash.
+restore_and_replay() uses frameId for correct journal suffix lookup.
 
-Each entry chains prevFrameHash -> frameHash. verify_chain() detects broken
-sequences, broken links, and headHash mismatches. replay_journal() reconstructs
-final text from journal entries alone.
+**API contract:** POST /tx validates all 7 required fields. GET /frames
+requires since >= 0. route() returns NOT_FOUND for unknown method+path.
 
-**Gateway:**
+**WebSocket:** deliveredUpTo tracked per subscription. FRAME_ALREADY_DELIVERED
+on regression. pending_frame_messages() filters to undelivered only.
 
-Validates tx shape, checks workspaceId match, deduplicates by tx.id, assigns
-monotonic ingressSeq. Wrong-workspace txs are marked REJECTED in accept_many
-results without propagating error.
+**CLI:** --key=value and boolean --flag parsing. submit supports rename/set/delete.
+Unknown commands return UNKNOWN_COMMAND.
 
-**Workspace partitions:**
+**Workspace format:** canonical paths for journal/log/snapshot/meta/receipts.
+Manifest covers version+journalEntryCount+asgHash+projectionHash with manifestHash.
 
-Each workspace has its own gateway, ordered log, reducer consumer, journal, frame
-bus, and client set. Same tx.id is allowed in different workspaces.
-
-**Snapshots:**
-
-make_snapshot() captures store, projection, version, frameId, and asgHash.
-snapshotHash covers all fields. verify_snapshot() rejects tampering.
-restore_and_replay() restores from snapshot then replays journal suffix.
+**Editor adapter:** sync states DISCONNECTED/CONNECTING/SYNCED/BEHIND/ERROR.
+apply_diff_to_doc splices text by start/end offsets. cursor_offset checks bounds.
 
 ## Store Fixtures
 
@@ -186,8 +202,11 @@ restore_and_replay() restores from snapshot then replays journal suffix.
 
     fardrun run --program tests/run_all.fard --out out/tests_all
     fard_run_digest=sha256:975140f4ac0c929164c702d9595ae6f448bd71bbe6eec93fa185b7f55cc953c3
+    { overallOk: true, phase: C, passed: 12, failed: 0 }
 
-    { overallOk: true, phase: "C", passed: 12, failed: 0 }
+    fardrun run --program tests/test_e2e_demo.fard --out out/t_e2e
+    fard_run_digest=sha256:373571348fee78becf188ade8c16ac3a1873d35d4f4e0eb7876f59c6ac32f3e4
+    { ok: true, passed: 18, failed: 0 }
 
 Stress suite:
 
