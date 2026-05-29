@@ -17,19 +17,36 @@ converge to identical text — provably, not probabilistically.
 
 FARD is a general-purpose deterministic functional language with a tree-walking
 interpreter (fardrun). This project implements the full ASG machine stack in FARD:
-store, reducer, projection, frame broadcast, client replay, HTTP/WS adapter
-contracts, in-memory server, and end-to-end smoke tests. All execution is
-deterministic and content-addressed.
+store, reducer, projection, frame broadcast, client replay, HTTP/WS contracts,
+in-memory server, and a live HTTP server using std/net and std/mutex.
+
+## Run the Server
+
+    fardrun run --program server.fard --out out/server_run
+
+Server listens on port 7777. Run the smoke test:
+
+    ./smoke.sh
+
+Expected output:
+
+    GET /health    -> ok: True version: 0.6.0 workspaces: 1
+    POST /tx       -> status: ACCEPTED ingressSeq: 1
+    POST /tx dup   -> status: DUPLICATE
+    GET /frames    -> count: 2 headFrameId: 2
+    GET /snapshot  -> version: 2 frameId: 2
+    GET /frames?since=head -> count since head: 0
 
 ## Architecture
 
     CLI submit
-    -> server.handle_request (multi-workspace manager)
-    -> request_router (HTTP dispatch)
-    -> runtime (gateway + log + consumer + bus + journal)
-    -> frame_bus (WebSocket delivery)
-    -> editor_bridge / editor_adapter (client replay)
-    -> snapshot / workspace_format (persistence)
+    -> server.fard (net.serve + mutex state)
+    -> server_process.fard (route dispatch)
+    -> server.fard (multi-workspace manager)
+    -> request_router.fard (HTTP handler)
+    -> runtime.fard (gateway + log + consumer + bus + journal)
+    -> frame_bus / editor_bridge / editor_adapter
+    -> snapshot / workspace_format
 
 ## Modules
 
@@ -68,129 +85,57 @@ deterministic and content-addressed.
     src/editor_adapter.fard          browser/editor adapter spec
 
     Phase E — Executable Network Runtime
-    src/runtime.fard                 stateful pipeline bundle (gateway+log+consumer+bus+journal)
+    src/runtime.fard                 stateful pipeline bundle
     src/request_router.fard          HTTP dispatch over api_contract
-    src/server.fard                  in-memory multi-workspace server
+    src/server.fard                  in-memory multi-workspace manager
 
-    main.fard                        executable demo
+    Phase F — Live Server
+    src/server_process.fard          HTTP route handler and query parser
+    server.fard                      net.serve entry point (port 7777, mutex state)
+    smoke.sh                         curl smoke test
+
+    main.fard                        batch demo
     tests/*.fard                     executable test programs
 
-## Run
+## Test Suite
 
-    # Demo
-    fardrun run --program main.fard --out out/asg_machine_demo
-
-    # Fast test suite (~seconds)
+    # Fast suite
     fardrun run --program tests/run_all.fard --out out/tests_all
 
-    # End-to-end smoke test
+    # E2E smoke
     fardrun run --program tests/test_e2e_smoke.fard --out out/t_smoke
 
-    # Stress convergence suite (~80s)
+    # Stress (~80s)
     fardrun run --program tests/test_stress_convergence.fard --out out/t_stress
 
 ## Scale
 
-    4,815 lines of FARD across 70 files
+    4,903 lines of FARD across 72 files
     607 invariant assertions
     0 failures
 
-## Test Suite
-
-Phase A — Correctness Core:
-
-| File | Assertions |
-|---|---|
-| test_asg.fard | 19 |
-| test_asg_move.fard | 13 |
-| test_asg_multi_store.fard | 7 |
-| test_rope.fard | 17 |
-| test_projection.fard | 9 |
-| test_projection_stability.fard | 11 |
-| test_projection_node_count.fard | 12 |
-| test_validate_projection.fard | 14 |
-| test_incremental_projection.fard | 17 |
-| test_idempotency.fard | 5 |
-| test_pending_resolution.fard | 4 |
-| test_convergence.fard | 10 |
-| test_replay.fard | 10 |
-
-Phase B — Client Runtime:
-
-| File | Assertions |
-|---|---|
-| test_editor_bridge.fard | 17 |
-| test_journal.fard | 20 |
-| test_recovery.fard | 15 |
-| test_multi_client_convergence.fard | 16 |
-| test_vfs.fard | 13 |
-| test_lsp_bridge.fard | 12 |
-
-Phase C — Distributed Runtime:
-
-| File | Assertions |
-|---|---|
-| test_gateway.fard | 19 |
-| test_ordered_log.fard | 18 |
-| test_reducer_consumer.fard | 9 |
-| test_frame_bus.fard | 15 |
-| test_distributed_sim.fard | 11 |
-| test_partition.fard | 8 |
-| test_snapshot.fard | 12 |
-
-Phase D — Production Adapter Boundary:
-
-| File | Assertions |
-|---|---|
-| test_api_contract.fard | 30 |
-| test_ws_stream.fard | 32 |
-| test_cli_driver.fard | 30 |
-| test_workspace_format.fard | 21 |
-| test_editor_adapter.fard | 27 |
-| test_e2e_demo.fard | 18 |
-
-Phase E — Executable Network Runtime:
-
-| File | Assertions |
-|---|---|
-| test_runtime.fard | 22 |
-| test_request_router.fard | 26 |
-| test_server.fard | 22 |
-| test_e2e_smoke.fard | 26 |
-
-Infrastructure:
-
-| File | Assertions |
-|---|---|
-| run_all.fard | 12 |
-| test_reducer_failure.fard | - |
-| test_reducer_edges.fard | - |
-| test_stress_convergence.fard | 8 |
-
-## End-to-End Smoke Test
-
-    fardrun run --program tests/test_e2e_smoke.fard --out out/t_smoke
-    fard_run_digest=sha256:2fe090cd69a98f44266143fe903f7b30af9697172a76004b3e744ed4c69e062d
-
-Verified path:
-
-    CLI parse
-    -> server POST /tx (201 ACCEPTED)
-    -> GET /frames (journal entries)
-    -> recovery.replay_since (client catch-up)
-    -> editor_adapter.apply_diff_to_doc (SYNCED)
-    -> GET /snapshot (verified)
-    -> WebSocket pending_frame_messages
-    -> editor text == client text == server text
+| Phase | Files | Key modules |
+|---|---|---|
+| A Correctness | 9 | asg, reducer, projection, rope, transactions |
+| B Client Runtime | 5 | editor_bridge, journal, recovery, vfs, lsp_bridge |
+| C Distributed | 7 | gateway, ordered_log, reducer_consumer, frame_bus, snapshot |
+| D Adapter Boundary | 5 | api_contract, ws_stream, cli_driver, editor_adapter |
+| E Network Runtime | 3 | runtime, request_router, server |
+| F Live Server | 3 | server_process, server.fard, smoke.sh |
 
 ## Proof of Execution
 
-    fardrun run --program tests/run_all.fard --out out/tests_all
+Live server smoke test:
+
+    ./smoke.sh  (server running on port 7777)
+    === PASS ===
+
+Fast suite:
+
     fard_run_digest=sha256:975140f4ac0c929164c702d9595ae6f448bd71bbe6eec93fa185b7f55cc953c3
     { overallOk: true, phase: C, passed: 12, failed: 0 }
 
-Stress suite:
+E2E smoke:
 
-    fardrun run --program tests/test_stress_convergence.fard --out out/t_stress
-    100-tx convergence (batch 5): PASS
-    50-tx convergence (batch 1): PASS
+    fard_run_digest=sha256:2fe090cd69a98f44266143fe903f7b30af9697172a76004b3e744ed4c69e062d
+    { ok: true, passed: 26, failed: 0 }
