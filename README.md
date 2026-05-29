@@ -150,7 +150,8 @@ provably, not probabilistically.
     server_audited.fard              auditable server (port 7779)
 
     Phase J — Adversarial Demo
-    demo_adversarial.fard            CRDT vs ASG Machine on conflicting edits
+    demo_adversarial.sh              CRDT vs ASG Machine (end-to-end via live server)
+    demo_extended.sh                 Three-way concurrency, failure mode, crash recovery
 
 ## Scale
 
@@ -179,11 +180,25 @@ Adversarial demo (end-to-end through live server):
     fardrun run --program server_audited.fard --out out/server_audited
     ./demo_adversarial.sh
 
-    tx_a ACCEPTED seq:1, tx_b ACCEPTED seq:2
-    frames: 2 head: 2
     CRDT naive:   fn compute() {  let xcounter + 1= 1  (broken)
     ASG Machine:  fn compute() {  let x = counter + 1  (correct)
     VERDICT: ASG_WINS
+
+Extended demo:
+
+    ./demo_extended.sh
+
+    Demo 1 — Three-way concurrency:
+      Alice rename APPLIED, Bob set APPLIED, reducer verdicts in frames
+      Result: fn compute() {  let x = counter + 1 }
+
+    Demo 2 — Failure mode:
+      Alice delete APPLIED, Bob rename FAILED: PRECONDITION_EXISTS_FAILED
+      Gateway accepts both (sequencing only); reducer enforces preconditions
+
+    Demo 3 — Crash recovery:
+      Client at frame 3, server at head 5
+      Poll /frames?since=3 -> 2 catch-up frames, Converged: True
 
 Fast suite:
 
