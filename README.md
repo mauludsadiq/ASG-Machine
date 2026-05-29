@@ -1,8 +1,27 @@
 # ASG Machine
 
-A deterministic collaborative ASG machine written in FARD.
+Text CRDTs converge, but they don't understand code. Rename a variable while your
+teammate deletes the line it's on — you get garbage. ASG Machine converges
+structurally, with cryptographic proofs.
 
-Authoritative correctness flow:
+    Client A: rename(x -> counter) ----+
+                                       +--> [ASG Machine] --> identical ASTs
+    Client B: delete_stmt_1() ---------+
+
+Every operation is a semantic transaction against a versioned AST. The reducer
+applies them deterministically, emits cryptographically hashed frames, and
+broadcasts minimal projection diffs to clients. Clients replay frames and
+converge to identical text — provably, not probabilistically.
+
+## What is FARD
+
+FARD is a general-purpose deterministic functional language with a tree-walking
+interpreter (fardrun). This project uses FARD to implement the full ASG machine
+stack: store, reducer, projection, frame broadcast, and client replay. All
+execution is deterministic and content-addressed — every run produces a
+cryptographic receipt tying inputs to outputs.
+
+## Architecture
 
     ordered semantic transaction stream
     -> deterministic reducer
@@ -11,19 +30,7 @@ Authoritative correctness flow:
     -> reducer frame broadcast
     -> clients / VFS / LSP / sandbox consumers
 
-This package implements:
-
-- ASG node store with versioned structural mutation.
-- Projection graph from ASG to deterministic text.
-- Rope-like segment model with deterministic range replacement.
-- Semantic transactions with dependencies and preconditions.
-- Reducer frame machine with global versions and frame hashes.
-- LCG-seeded pseudo-random operation generation for convergence harness.
-- Deterministic editor bridge for client-side frame replay.
-- Incremental projection engine with minimal subtree diffs.
-- Isolated unit tests for every module with hard invariant assertions.
-
-## Layout
+## Modules
 
     src/core.fard                    shared result/assert/hash helpers
     src/asg.fard                     ASG store and structural mutation
@@ -40,8 +47,6 @@ This package implements:
 
 ## Run
 
-From this directory:
-
     # Demo
     fardrun run --program main.fard --out out/asg_machine_demo
 
@@ -51,14 +56,13 @@ From this directory:
     # Stress convergence suite (~80s)
     fardrun run --program tests/test_stress_convergence.fard --out out/t_stress
 
-The implementation avoids placeholders and stubs: all exported functions perform
-concrete validation or mutation and return deterministic records.
-
 ## Scale
 
     1,743 lines of FARD across 29 files
     864 lines source (10 modules)
     876 lines tests (19 test programs)
+    185+ invariant assertions
+    0 failures
 
 ## Test Suite
 
@@ -83,8 +87,6 @@ concrete validation or mutation and return deterministic records.
 | run_all.fard | 12 | fast full suite with hard invariant assertions |
 | test_stress_convergence.fard | 8 | 100-tx and batch-1 convergence (~80s) |
 
-Total: 18 test files, 185+ assertions, 0 failures.
-
 ## Documented Behaviors
 
 **Failure semantics:**
@@ -106,19 +108,11 @@ Transaction IDs are tracked in processedOps across the lifetime of the machine.
 Submitting the same tx.id twice in the same batch or across batches produces
 DUPLICATE on the second occurrence. State and hash are unaffected.
 
-**validate_projection error paths:**
-
-- PROJECTION_TEXT_MISMATCH: returned when the projection text does not match
-  a full rebuild from the store. data.expected = correct text, data.actual = stale text.
-- PROJECTION_HASH_MISMATCH: returned when text matches but hash does not.
-  data.expected = correct hash, data.actual = stale hash.
-
 **Editor bridge frame tracking:**
 
-The editor bridge tracks frames by frameId (sequence number), not globalVersion.
-Frames are rejected as STALE_FRAME if frameId <= clientVersion, and as FRAME_GAP
-if frameId != clientVersion + 1. Duplicate frames (already applied frameId) are
-silently skipped without error.
+The editor bridge tracks frames by frameId (sequence number). Frames are rejected
+as STALE_FRAME if frameId <= clientVersion, and as FRAME_GAP if frameId !=
+clientVersion + 1. Duplicate frames are silently skipped without error.
 
 **Incremental projection diffs:**
 
@@ -127,9 +121,12 @@ and emits a diff covering only that span. Falls back to full-document replacemen
 when the target node is deleted or not found in the new projection.
 Unchanged subtree hashes are preserved across mutations.
 
-## Store Fixtures
+**validate_projection error paths:**
 
-Three fixtures are available in asg.fard for testing:
+- PROJECTION_TEXT_MISMATCH: projection text does not match a full rebuild.
+- PROJECTION_HASH_MISMATCH: text matches but hash does not.
+
+## Store Fixtures
 
 - sample_store(): one function, two statements (Let + Return)
 - deep_store(): two functions with subtrees (6 nodes total)
@@ -137,9 +134,10 @@ Three fixtures are available in asg.fard for testing:
 
 ## Proof of Execution
 
-Version: v0.1.3 (Phase A) + B.1 editor bridge + B.2 incremental projection
+    fardrun run --program tests/run_all.fard --out out/tests_all
+    fard_run_digest=sha256:ff7c0609f5d095c749a5dfec25c2e0994417ffccf3205c6b06a309c4bf999449
 
-Fast suite verified properties:
+Verified properties:
 
 - Projection convergence: PASS
 - Replica/server text convergence: PASS
@@ -147,20 +145,14 @@ Fast suite verified properties:
 - Frame sequencing invariants: PASS
 - Deterministic reducer replay: PASS
 - Semantic failure handling: PASS
-- Reducer edge cases: PASS
-- validate_projection TEXT_MISMATCH: PASS
-- validate_projection HASH_MISMATCH: PASS
 - Editor bridge stale/gap rejection: PASS
 - Editor bridge replay determinism: PASS
 - Incremental projection minimal diffs: PASS
 - Incremental projection hash preservation: PASS
 
-Stress suite verified properties:
+Stress suite (separate, ~80s):
+
+    fardrun run --program tests/test_stress_convergence.fard --out out/t_stress
 
 - 100-transaction convergence (batch size 5): PASS
 - 50-transaction convergence (batch size 1): PASS
-
-Verified commands:
-
-    fardrun run --program tests/run_all.fard --out out/tests_all
-    fardrun run --program tests/test_stress_convergence.fard --out out/t_stress
