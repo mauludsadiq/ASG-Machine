@@ -1,0 +1,39 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frame
+import("../src/core") as core
+import("std/list") as list
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let mach = frame.make_machine(rr, 3, 10)
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "y"), 3, "r")
+let tx4 = txs.tx("tx4", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v2"), 4, "r")
+
+let m = frame.run_batches(mach, [tx1, tx2, tx3, tx4])?
+
+// replay on empty frames
+let r0 = frame.replay(rr, [])?
+let a1 = core.assert_equal("empty replay frameCount", r0.frameCount, 0)
+let a2 = core.assert_equal("empty replay globalVersion", r0.finalGlobalVersion, 0)
+let a3 = core.assert_equal("empty replay frameHash", r0.finalFrameHash, "")
+let a4 = core.assert_equal("empty replay text is initial", r0.finalProjectionText, rr.projection.text)
+
+// replay on actual frames
+let r1 = frame.replay(rr, m.frames)?
+let a5 = core.assert_equal("replay frameCount matches", r1.frameCount, list.len(m.frames))
+let a6 = core.assert_equal("replay finalGlobalVersion matches", r1.finalGlobalVersion, m.reducer.globalVersion)
+let a7 = core.assert_equal("replay finalFrameHash matches last frame", r1.finalFrameHash, list.last(m.frames).frameHash)
+let a8 = core.assert_equal("replay finalProjectionText matches server", r1.finalProjectionText, m.reducer.projection.text)
+
+// replay on single frame
+let m1 = frame.run_batches(mach, [tx1])?
+let r2 = frame.replay(rr, m1.frames)?
+let a9 = core.assert_equal("single frame replay frameCount", r2.frameCount, 1)
+let a10 = core.assert_equal("single frame replay text matches", r2.finalProjectionText, m1.reducer.projection.text)
+
+core.ok(core.test_summary("replay", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10]))

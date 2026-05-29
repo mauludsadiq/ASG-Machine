@@ -50,8 +50,14 @@ fn run_batches(machine, txs) {
 }
 
 fn replay(initialReducer, frames) {
-  let final_projection_text = if list.len(frames) == 0 then initialReducer.projection.text else list.last(frames).derivedEffects.projectionDiffs
-  core.ok({ frameCount: list.len(frames), finalGlobalVersion: if list.len(frames) == 0 then 0 else list.last(frames).globalVersion, finalFrameHash: if list.len(frames) == 0 then "" else list.last(frames).frameHash })
+  let n = list.len(frames) in
+  let lastFrame = if n == 0 then null else list.last(frames) in
+  let finalGlobalVersion = if lastFrame == null then 0 else lastFrame.globalVersion in
+  let finalFrameHash = if lastFrame == null then "" else lastFrame.frameHash in
+  let lastDiffs = if lastFrame == null then [] else lastFrame.derivedEffects.projectionDiffs in
+  let lastDiff = if list.len(lastDiffs) == 0 then null else list.last(lastDiffs) in
+  let finalProjectionText = if lastDiff == null then initialReducer.projection.text else lastDiff.newText in
+  core.ok({ frameCount: n, finalGlobalVersion: finalGlobalVersion, finalFrameHash: finalFrameHash, finalProjectionText: finalProjectionText })
 }
 
 fn verify_frame_sequence(frames) {
