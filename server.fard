@@ -1,0 +1,22 @@
+import("std/net") as net
+import("std/json") as json
+import("std/mutex") as mutex
+import("./src/core") as core
+import("./src/asg") as asg
+import("./src/server") as srv
+import("./src/server_process") as sp
+
+// Boot: create default workspace
+let store = asg.sample_store()
+let boot = srv.create_workspace(srv.empty_server("0.6.0"), "ws", "main.fard", store)
+let initial_server = if core.is_err(boot) then srv.empty_server("0.6.0") else boot.v
+
+// Mutable server state via mutex
+let state = mutex.new(initial_server)
+
+net.serve(7777, fn(req) {
+  let current = mutex.lock(state) in
+  let result = sp.handle(current, req) in
+  let _ = mutex.unlock(state, result.server) in
+  result.response
+})

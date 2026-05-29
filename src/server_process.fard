@@ -1,0 +1,66 @@
+import("std/net") as net
+import("std/json") as json
+import("std/str") as str
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("std/int") as int_mod
+import("./server") as srv
+import("./runtime") as rt
+
+// Parse path and query string from raw req.path
+// e.g. "/frames?since=0&workspaceId=ws" -> { path: "/frames", query: { since: "0", workspaceId: "ws" } }
+fn parse_path(raw) {
+  let parts = str.split(raw, "?") in
+  let path = list.get(parts, 0) in
+  let query_str = if list.len(parts) > 1 then list.get(parts, 1) else "" in
+  let query = if query_str == "" then rec.empty() else
+    list.fold(str.split(query_str, "&"), {}, fn(acc, pair) {
+      let kv = str.split(pair, "=") in
+      if list.len(kv) == 2 then rec.set(acc, list.get(kv, 0), list.get(kv, 1)) else acc
+    }) in
+  { path: path, query: query }
+}
+
+fn json_response(status, body_val) {
+  { status: status, headers: { "Content-Type": "application/json" }, body: json.encode(body_val) }
+}
+
+fn error_response(status, code, message) {
+  json_response(status, { error: code, message: message })
+}
+
+fn handle(server_state, req) {
+  let parsed = parse_path(req.path) in
+  let path = parsed.path in
+  let query = parsed.query in
+  let method = req.method in
+  let body = if method == "POST" then
+    let b = json.decode(req.body) in
+    if b == null then rec.empty() else b
+  else rec.empty() in
+  let workspaceId = rec.getOr(query, "workspaceId", rec.getOr(body, "workspaceId", "")) in
+  if path == "/health" then
+    { response: json_response(200, { ok: true, version: "0.6.0", workspaceCount: srv.workspace_count(server_state) }), server: server_state } else
+  if path == "/tx" && method == "POST" then
+    let r = srv.handle_request(server_state, "POST", "/tx", workspaceId, body) in
+    if core.is_err(r) then
+      { response: error_response(500, "INTERNAL_ERROR", "request failed"), server: server_state } else
+    { response: json_response(r.v.response.httpStatus, r.v.response.body), server: r.v.server } else
+  if path == "/frames" && method == "GET" then
+    let since_str = rec.getOr(query, "since", "0") in
+    let since_parsed = int_mod.parse(since_str) in
+    let since = if core.is_err(since_parsed) then 0 else since_parsed.v in
+    let r = srv.handle_request(server_state, "GET", "/frames", workspaceId, { workspaceId: workspaceId, since: since }) in
+    if core.is_err(r) then
+      { response: error_response(500, "INTERNAL_ERROR", "request failed"), server: server_state } else
+    { response: json_response(r.v.response.httpStatus, r.v.response.body), server: r.v.server } else
+  if path == "/snapshot" && method == "GET" then
+    let r = srv.handle_request(server_state, "GET", "/snapshot", workspaceId, { workspaceId: workspaceId }) in
+    if core.is_err(r) then
+      { response: error_response(500, "INTERNAL_ERROR", "request failed"), server: server_state } else
+    { response: json_response(r.v.response.httpStatus, r.v.response.body), server: r.v.server } else
+  { response: error_response(404, "NOT_FOUND", path), server: server_state }
+}
+
+export { parse_path, json_response, error_response, handle }
