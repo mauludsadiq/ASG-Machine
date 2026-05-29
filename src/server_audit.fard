@@ -1,0 +1,133 @@
+import("std/type") as type
+import("./asg") as asg
+import("std/json") as json
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("std/int") as int_mod
+import("./core") as core
+import("./identity") as identity
+import("./acl") as acl_mod
+import("./signed_request") as sreq
+import("./server_process") as sp
+import("./audit_log") as audit
+import("./metrics") as metrics
+import("./runtime") as rt
+
+// Admin-capable roles
+fn can_admin_read(acl, workspaceId, userId) {
+  let role = acl_mod.get_role(acl, workspaceId, userId) in
+  role == "owner"
+}
+
+fn auth_response(status, body) {
+  { status: status, headers: { "Content-Type": "application/json" }, body: json.encode(body) }
+}
+
+fn handle_audited(auth_srv, srv_state, audit_log, mtrx, req) {
+  let safe_headers = if rec.has(req, "headers") && req.headers != null then req.headers else rec.empty() in
+  let req = { ...req, headers: safe_headers } in
+  let parsed = sp.parse_path(req.path) in
+  let path = parsed.path in
+  let query = parsed.query in
+  let method = req.method in
+  let body = if method == "POST" then
+    let b = json.decode(req.body) in if b == null then rec.empty() else b
+  else rec.empty() in
+  let workspaceId = rec.getOr(query, "workspaceId", rec.getOr(body, "workspaceId", "")) in
+  let mtrx2 = metrics.inc_total(mtrx) in
+  if path == "/health" then
+    let ws = rec.get(srv_state.workspaces, workspaceId) in
+    let snap_ver = if ws == null then 0 else ws.consumer.machine.reducer.globalVersion in
+    core.ok({ auth_srv: auth_srv, srv_state: srv_state, audit_log: audit_log, metrics: mtrx2,
+      response: auth_response(200, { ok: true, version: "0.9.0", workspaceCount: list.len(rec.keys(srv_state.workspaces)) }) }) else
+  let token_r = sreq.extract_auth(req.headers) in
+  if core.is_err(token_r) then
+    let alog2 = audit.append_auth_failure(audit_log, "MISSING_TOKEN", path) in
+    let mtrx3 = metrics.inc_auth_failures(mtrx2) in
+    core.ok({ auth_srv: auth_srv, srv_state: srv_state, audit_log: alog2, metrics: mtrx3,
+      response: auth_response(401, { error: "MISSING_TOKEN" }) }) else
+  let nonce = rec.getOr(req.headers, "x-nonce", "") in
+  if nonce == "" then
+    let alog2 = audit.append_auth_failure(audit_log, "MISSING_NONCE", path) in
+    let mtrx3 = metrics.inc_auth_failures(mtrx2) in
+    core.ok({ auth_srv: auth_srv, srv_state: srv_state, audit_log: alog2, metrics: mtrx3,
+      response: auth_response(400, { error: "MISSING_NONCE" }) }) else
+  let verify_r = sreq.verify_signed_request({ token: token_r.v, nonce: nonce }, auth_srv.secret, auth_srv.nonceStore) in
+  if core.is_err(verify_r) then
+    let code = verify_r.code in
+    let is_replay = code == "NONCE_REPLAYED" in
+    let alog2 = if is_replay then audit.append_nonce_replay(audit_log, "unknown", nonce) else audit.append_auth_failure(audit_log, code, path) in
+    let mtrx3 = if is_replay then metrics.inc_nonce_replays(mtrx2) else metrics.inc_auth_failures(mtrx2) in
+    let status = if is_replay then 409 else 401 in
+    core.ok({ auth_srv: auth_srv, srv_state: srv_state, audit_log: alog2, metrics: mtrx3,
+      response: auth_response(status, { error: code }) }) else
+  let userId = verify_r.v.userId in
+  let auth_srv2 = { ...auth_srv, nonceStore: verify_r.v.nonceStore } in
+  if path == "/admin/audit" then
+    if !can_admin_read(auth_srv2.acl, workspaceId, userId) then
+      let alog2 = audit.append_denied(audit_log, userId, "NOT_OWNER", path, workspaceId) in
+      let mtrx3 = metrics.inc_permission_denied(mtrx2) in
+      core.ok({ auth_srv: auth_srv2, srv_state: srv_state, audit_log: alog2, metrics: mtrx3,
+        response: auth_response(403, { error: "PERMISSION_DENIED", required: "owner" }) }) else
+    let since_str = rec.getOr(query, "since", "0") in
+    let since_r = int_mod.parse(since_str) in
+    let since = if core.is_err(since_r) then 0 else since_r.v in
+    let entries = audit.since_index(audit_log, since) in
+    core.ok({ auth_srv: auth_srv2, srv_state: srv_state, audit_log: audit_log, metrics: mtrx2,
+      response: auth_response(200, { entries: entries, count: list.len(entries), headHash: audit.audit_hash(audit_log) }) }) else
+  if path == "/admin/metrics" then
+    if !can_admin_read(auth_srv2.acl, workspaceId, userId) then
+      let alog2 = audit.append_denied(audit_log, userId, "NOT_OWNER", path, workspaceId) in
+      let mtrx3 = metrics.inc_permission_denied(mtrx2) in
+      core.ok({ auth_srv: auth_srv2, srv_state: srv_state, audit_log: alog2, metrics: mtrx3,
+        response: auth_response(403, { error: "PERMISSION_DENIED", required: "owner" }) }) else
+    let ws = rec.get(srv_state.workspaces, workspaceId) in
+    let snap_ver = if ws == null then 0 else ws.consumer.machine.reducer.globalVersion in
+    core.ok({ auth_srv: auth_srv2, srv_state: srv_state, audit_log: audit_log, metrics: mtrx2,
+      response: auth_response(200, metrics.metrics_summary(mtrx2, snap_ver)) }) else
+  if path == "/admin/state_hash" then
+    if !can_admin_read(auth_srv2.acl, workspaceId, userId) then
+      let alog2 = audit.append_denied(audit_log, userId, "NOT_OWNER", path, workspaceId) in
+      let mtrx3 = metrics.inc_permission_denied(mtrx2) in
+      core.ok({ auth_srv: auth_srv2, srv_state: srv_state, audit_log: alog2, metrics: mtrx3,
+        response: auth_response(403, { error: "PERMISSION_DENIED", required: "owner" }) }) else
+    let ws = rec.get(srv_state.workspaces, workspaceId) in
+    let h = if ws == null then "" else asg_snap_hash(ws) in
+    core.ok({ auth_srv: auth_srv2, srv_state: srv_state, audit_log: audit_log, metrics: mtrx2,
+      response: auth_response(200, { stateHash: audit.audit_hash(audit_log), metricsHash: metrics.metrics_hash(mtrx2) }) }) else
+  let perm_r = if method == "POST" && path == "/tx" then acl_mod.check_submit(auth_srv2.acl, workspaceId, userId)
+    else acl_mod.check_read(auth_srv2.acl, workspaceId, userId) in
+  if core.is_err(perm_r) then
+    let alog2 = audit.append_denied(audit_log, userId, perm_r.code, path, workspaceId) in
+    let mtrx3 = metrics.inc_permission_denied(mtrx2) in
+    core.ok({ auth_srv: auth_srv2, srv_state: srv_state, audit_log: alog2, metrics: mtrx3,
+      response: auth_response(403, { error: perm_r.code }) }) else
+  let r = sp.handle(srv_state, req) in
+  let resp_body = r.response.body in
+  let resp_status = if rec.has(r.response, "status") then r.response.status else r.response.httpStatus in
+  let is_accepted = resp_status == 201 in
+  let is_dup = resp_status == 200 && method == "POST" && path == "/tx" && type.of(resp_body) == "record" && rec.has(resp_body, "status") && resp_body.status == "DUPLICATE" in
+  let tx_id = rec.getOr(body, "id", "") in
+  let ingress_seq = if type.of(resp_body) == "record" && rec.has(resp_body, "ingressSeq") then resp_body.ingressSeq else 0 in
+  let alog2 =
+    if is_accepted then audit.append_tx_accepted(audit_log, userId, tx_id, workspaceId, ingress_seq) else
+    if is_dup then audit.append_tx_duplicate(audit_log, userId, tx_id, workspaceId) else
+    if path == "/snapshot" then audit.append_read(audit_log, userId, "SNAPSHOT_READ", workspaceId) else
+    if path == "/frames" then audit.append_read(audit_log, userId, "FRAMES_READ", workspaceId) else
+    audit_log in
+  let mtrx3 =
+    if is_accepted then metrics.inc_tx_accepted(mtrx2) else
+    if is_dup then metrics.inc_tx_duplicate(mtrx2) else
+    if path == "/snapshot" then metrics.inc_snapshot_reads(mtrx2) else
+    if path == "/frames" then metrics.inc_frame_reads(mtrx2) else
+    mtrx2 in
+  core.ok({ auth_srv: auth_srv2, srv_state: r.server, audit_log: alog2, metrics: mtrx3,
+    response: { status: resp_status, headers: rec.getOr(r.response, "headers", rec.empty()), body: resp_body } })
+}
+
+fn asg_snap_hash(ws) {
+  asg.snapshot_hash(ws.consumer.machine.reducer.store)
+}
+
+export { handle_audited, can_admin_read }

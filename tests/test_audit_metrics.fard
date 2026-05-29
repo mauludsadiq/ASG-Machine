@@ -1,0 +1,81 @@
+import("../src/audit_log") as audit
+import("../src/metrics") as metrics
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let log0 = audit.make_audit_log()
+
+// append and chain
+let log1 = audit.append_tx_accepted(log0, "alice", "tx1", "ws", 1)
+let log2 = audit.append_tx_duplicate(log1, "bob", "tx1", "ws")
+let log3 = audit.append_denied(log2, "carol", "PERMISSION_DENIED", "/tx", "ws")
+let log4 = audit.append_auth_failure(log3, "MISSING_TOKEN", "/tx")
+let log5 = audit.append_nonce_replay(log4, "alice", "nonce_1")
+let log6 = audit.append_read(log5, "carol", "SNAPSHOT_READ", "ws")
+
+let a1 = core.assert_equal("entry count", list.len(log6.entries), 6)
+let a2 = core.assert_equal("first entry type", list.get(log6.entries, 0).eventType, "TX_ACCEPTED")
+let a3 = core.assert_equal("second entry type", list.get(log6.entries, 1).eventType, "TX_DUPLICATE")
+let a4 = core.assert_equal("headHash non-empty", log6.headHash != "", true)
+let a5 = core.assert_equal("first prevHash empty", list.get(log6.entries, 0).prevHash, "")
+let a6 = core.assert_equal("chain links", list.get(log6.entries, 1).prevHash, list.get(log6.entries, 0).entryHash)
+
+// verify_chain passes
+let vc = audit.verify_chain(log6)?
+let a7 = core.assert_equal("chain valid", vc, true)
+
+// empty log chain valid
+let vc0 = audit.verify_chain(log0)?
+let a8 = core.assert_equal("empty chain valid", vc0, true)
+
+// corruption detection
+let tampered_entry = { ...list.get(log6.entries, 0), entryHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+let tampered_entries = list.build(list.len(log6.entries), fn(i) { if i == 0 then tampered_entry else list.get(log6.entries, i) })
+let log_tampered = { entries: tampered_entries, headHash: log6.headHash }
+let vc_bad = audit.verify_chain(log_tampered)
+let a9 = core.assert_equal("tampered chain detected", vc_bad.t, "err")
+let a10 = core.assert_equal("tampered chain code", vc_bad.code, "AUDIT_CHAIN_BROKEN")
+
+// since_index
+let since2 = audit.since_index(log6, 2)
+let a11 = core.assert_equal("since_index(2) count", list.len(since2), 4)
+let since0 = audit.since_index(log6, 0)
+let a12 = core.assert_equal("since_index(0) all", list.len(since0), 6)
+
+// audit_hash
+let h1 = audit.audit_hash(log6)
+let h2 = audit.audit_hash(log6)
+let a13 = core.assert_equal("audit_hash deterministic", h1, h2)
+
+// metrics
+let m0 = metrics.make_metrics()
+let m1 = metrics.inc_tx_accepted(m0)
+let m2 = metrics.inc_tx_accepted(m1)
+let m3 = metrics.inc_tx_duplicate(m2)
+let m4 = metrics.inc_auth_failures(m3)
+let m5 = metrics.inc_nonce_replays(m4)
+let m6 = metrics.inc_permission_denied(m5)
+let m7 = metrics.inc_snapshot_reads(m6)
+let m8 = metrics.inc_frame_reads(m7)
+
+let a14 = core.assert_equal("txAccepted count", m8.txAccepted, 2)
+let a15 = core.assert_equal("txDuplicate count", m8.txDuplicate, 1)
+let a16 = core.assert_equal("authFailures count", m8.authFailures, 1)
+let a17 = core.assert_equal("nonceReplays count", m8.nonceReplays, 1)
+let a18 = core.assert_equal("permissionDenied count", m8.permissionDenied, 1)
+let a19 = core.assert_equal("snapshotReads count", m8.snapshotReads, 1)
+let a20 = core.assert_equal("frameReads count", m8.frameReads, 1)
+let a21 = core.assert_equal("totalRequests count", m8.totalRequests, 8)
+
+// metrics_hash deterministic
+let mh1 = metrics.metrics_hash(m8)
+let mh2 = metrics.metrics_hash(m8)
+let a22 = core.assert_equal("metrics_hash deterministic", mh1, mh2)
+
+// metrics_summary
+let ms = metrics.metrics_summary(m8, 5)
+let a23 = core.assert_equal("summary snapshotVersion", ms.snapshotVersion, 5)
+let a24 = core.assert_equal("summary has metricsHash", ms.metricsHash != "", true)
+
+core.ok(core.test_summary("audit_metrics", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24]))

@@ -1,0 +1,41 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+
+// Metrics: deterministic counters for operator observability.
+
+fn make_metrics() {
+  {
+    txAccepted: 0,
+    txDuplicate: 0,
+    txRejected: 0,
+    frameCount: 0,
+    snapshotReads: 0,
+    frameReads: 0,
+    authFailures: 0,
+    nonceReplays: 0,
+    permissionDenied: 0,
+    totalRequests: 0
+  }
+}
+
+fn inc_tx_accepted(m) { { ...m, txAccepted: m.txAccepted + 1, totalRequests: m.totalRequests + 1 } }
+fn inc_tx_duplicate(m) { { ...m, txDuplicate: m.txDuplicate + 1, totalRequests: m.totalRequests + 1 } }
+fn inc_tx_rejected(m) { { ...m, txRejected: m.txRejected + 1, totalRequests: m.totalRequests + 1 } }
+fn inc_frame_count(m, n) { { ...m, frameCount: m.frameCount + n } }
+fn inc_snapshot_reads(m) { { ...m, snapshotReads: m.snapshotReads + 1, totalRequests: m.totalRequests + 1 } }
+fn inc_frame_reads(m) { { ...m, frameReads: m.frameReads + 1, totalRequests: m.totalRequests + 1 } }
+fn inc_auth_failures(m) { { ...m, authFailures: m.authFailures + 1, totalRequests: m.totalRequests + 1 } }
+fn inc_nonce_replays(m) { { ...m, nonceReplays: m.nonceReplays + 1, totalRequests: m.totalRequests + 1 } }
+fn inc_permission_denied(m) { { ...m, permissionDenied: m.permissionDenied + 1, totalRequests: m.totalRequests + 1 } }
+fn inc_total(m) { { ...m, totalRequests: m.totalRequests + 1 } }
+
+fn metrics_hash(m) {
+  core.digest({ txAccepted: m.txAccepted, txDuplicate: m.txDuplicate, txRejected: m.txRejected, authFailures: m.authFailures, nonceReplays: m.nonceReplays })
+}
+
+fn metrics_summary(m, snapshotVersion) {
+  { ...m, snapshotVersion: snapshotVersion, metricsHash: metrics_hash(m) }
+}
+
+export { make_metrics, inc_tx_accepted, inc_tx_duplicate, inc_tx_rejected, inc_frame_count, inc_snapshot_reads, inc_frame_reads, inc_auth_failures, inc_nonce_replays, inc_permission_denied, inc_total, metrics_hash, metrics_summary }
