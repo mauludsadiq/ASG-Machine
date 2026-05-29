@@ -1,0 +1,46 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./ordered_log") as olog
+import("./frame") as frm
+import("./journal") as journal
+import("./asg") as asg
+
+fn make_consumer(workspaceId, consumerId, machine, jrnl) {
+  { workspaceId: workspaceId, consumerId: consumerId, offset: 0, machine: machine, journal: jrnl }
+}
+
+fn consume_batch(consumer, log, batchSize) {
+  let entries = olog.read_from(log, consumer.offset) in
+  let batch = list.take(entries, batchSize) in
+  if list.len(batch) == 0 then core.ok({ consumer: consumer, framesProduced: 0 }) else
+  let tx_batch = list.map(batch, fn(e) { e.tx }) in
+  let prevFrameCount = list.len(consumer.machine.frames) in
+  let mr = frm.run_batches(consumer.machine, tx_batch) in
+  if core.is_err(mr) then mr else
+  let m2 = mr.v in
+  let newFrames = list.drop(m2.frames, prevFrameCount) in
+  let reducerHash = asg.snapshot_hash(m2.reducer.store) in
+  let j2 = journal.append_frames(consumer.journal, newFrames, reducerHash) in
+  let newOffset = consumer.offset + list.len(batch) in
+  let c2 = { ...consumer, offset: newOffset, machine: m2, journal: j2 } in
+  core.ok({ consumer: c2, framesProduced: list.len(newFrames) })
+}
+
+fn consume_all(consumer, log, batchSize) {
+  let total = list.len(log.entries) in
+  let result = list.fold(list.range(0, total), core.ok(consumer), fn(acc, _) {
+    if core.is_err(acc) then acc else
+    let c = acc.v in
+    if c.offset >= total then acc else
+    let r = consume_batch(c, log, batchSize) in
+    if core.is_err(r) then r else core.ok(r.v.consumer)
+  }) in
+  result
+}
+
+fn consumer_hash(consumer) {
+  core.digest({ workspaceId: consumer.workspaceId, consumerId: consumer.consumerId, offset: consumer.offset, journalHash: journal.journal_hash(consumer.journal) })
+}
+
+export { make_consumer, consume_batch, consume_all, consumer_hash }

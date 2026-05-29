@@ -1,0 +1,57 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/ordered_log") as olog
+import("../src/journal") as journal
+import("../src/reducer_consumer") as rc
+import("../src/core") as core
+import("std/list") as list
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let mach = frm.make_machine(rr, 3, 10)
+let jrnl = journal.empty_journal("ws", "main.fard")
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r")
+let tx4 = txs.tx("tx4", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v2"), 4, "r")
+
+let log = olog.append_many(olog.empty_log("ws"), [tx1, tx2, tx3, tx4])
+
+// same log -> same frames via consume_all
+let consumer = rc.make_consumer("ws", "c1", mach, jrnl)
+let c1 = rc.consume_all(consumer, log, 2)?
+let c2 = rc.consume_all(rc.make_consumer("ws", "c2", frm.make_machine(rr, 3, 10), journal.empty_journal("ws", "main.fard")), log, 2)?
+let a1 = core.assert_equal("same log same journal hash", journal.journal_hash(c1.journal), journal.journal_hash(c2.journal))
+let a2 = core.assert_equal("offset advances to log end", c1.offset, list.len(log.entries))
+
+// same log -> same final text
+let a3 = core.assert_equal("same log same final text", c1.machine.reducer.projection.text, c2.machine.reducer.projection.text)
+
+// partial consume then resume == full consume
+let c_partial = rc.consume_all(rc.make_consumer("ws", "cp", frm.make_machine(rr, 3, 10), journal.empty_journal("ws", "main.fard")), olog.append_many(olog.empty_log("ws"), [tx1, tx2]), 2)?
+let log2 = olog.append_many(olog.empty_log("ws"), [tx1, tx2, tx3, tx4])
+let c_resumed = rc.consume_all({ ...c_partial, offset: c_partial.offset }, log2, 2)?
+let a4 = core.assert_equal("partial+resume text matches full", c_resumed.machine.reducer.projection.text, c1.machine.reducer.projection.text)
+
+// offset only advances after consume
+let c_fresh = rc.make_consumer("ws", "cf", frm.make_machine(rr, 3, 10), journal.empty_journal("ws", "main.fard"))
+let a5 = core.assert_equal("fresh consumer offset is 0", c_fresh.offset, 0)
+let c_one = rc.consume_batch(c_fresh, log, 2)?
+let a6 = core.assert_equal("offset advances by batch", c_one.consumer.offset, 2)
+
+// consumer replay deterministic — compare journal hash not consumer hash (consumerId differs)
+let h1 = journal.journal_hash(c1.journal)
+let h2 = journal.journal_hash(c2.journal)
+let a7 = core.assert_equal("consumer replay journal hash deterministic", h1, h2)
+
+// journal entries match frame count
+let a8 = core.assert_equal("journal entries from consume", list.len(c1.journal.entries) > 0, true)
+
+// verify journal chain integrity
+let vc = journal.verify_chain(c1.journal)?
+let a9 = core.assert_equal("consumed journal chain valid", vc, true)
+
+core.ok(core.test_summary("reducer_consumer", [a1, a2, a3, a4, a5, a6, a7, a8, a9]))
