@@ -1,0 +1,78 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/journal") as journal
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let initialText = rr.projection.text
+let mach = frm.make_machine(rr, 3, 10)
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r")
+let tx4 = txs.tx("tx4", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v2"), 4, "r")
+
+let m = frm.run_batches(mach, [tx1, tx2, tx3, tx4])?
+let frames = m.frames
+let reducerHash = asg.snapshot_hash(m.reducer.store)
+
+// empty journal
+let j0 = journal.empty_journal("ws", "main.fard")
+let a1 = core.assert_equal("empty journal has no entries", list.len(j0.entries), 0)
+let a2 = core.assert_equal("empty journal headHash", j0.headHash, "")
+
+// append single frame
+let j1 = journal.append_frame(j0, list.get(frames, 0), reducerHash)
+let a3 = core.assert_equal("after append entry count", list.len(j1.entries), 1)
+let a4 = core.assert_equal("first entry prevFrameHash empty", list.get(j1.entries, 0).prevFrameHash, "")
+let a5 = core.assert_equal("headHash equals first frame hash", j1.headHash, list.get(frames, 0).frameHash)
+
+// append all frames
+let j_full = journal.append_frames(j0, frames, reducerHash)
+let a6 = core.assert_equal("full journal entry count", list.len(j_full.entries), list.len(frames))
+let a7 = core.assert_equal("full journal headHash matches last frame", j_full.headHash, list.last(frames).frameHash)
+
+// verify_chain passes on valid journal
+let vc = journal.verify_chain(j_full)?
+let a8 = core.assert_equal("verify_chain ok", vc, true)
+
+// verify_chain on empty journal
+let vc0 = journal.verify_chain(j0)?
+let a9 = core.assert_equal("verify_chain ok on empty", vc0, true)
+
+// corruption detection: tamper with an entry hash
+let tampered_entry = { ...list.get(j_full.entries, 0), frameHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+let tampered_entries = list.build(list.len(j_full.entries), fn(i) { if i == 0 then tampered_entry else list.get(j_full.entries, i) })
+let j_tampered = { ...j_full, entries: tampered_entries }
+let vc_bad = journal.verify_chain(j_tampered)
+let a10 = core.assert_equal("tampered journal fails verify", vc_bad.t, "err")
+let a11 = core.assert_equal("tampered journal error code", vc_bad.code, "JOURNAL_CHAIN_BROKEN")
+
+// replay_journal recovers final text
+let replayed = journal.replay_journal(j_full, initialText)?
+let a12 = core.assert_equal("replay frameCount", replayed.frameCount, list.len(frames))
+let a13 = core.assert_equal("replay globalVersion", replayed.globalVersion, m.reducer.globalVersion)
+let a14 = core.assert_equal("replay text matches server", replayed.text, m.reducer.projection.text)
+
+// replay empty journal
+let replayed0 = journal.replay_journal(j0, initialText)?
+let a15 = core.assert_equal("empty replay text is initial", replayed0.text, initialText)
+let a16 = core.assert_equal("empty replay frameCount", replayed0.frameCount, 0)
+
+// frames_since
+let since1 = journal.frames_since(j_full, 1)
+let a17 = core.assert_equal("frames_since(1) count", list.len(since1), list.len(frames) - 1)
+let a18 = core.assert_equal("frames_since(0) returns all", list.len(journal.frames_since(j_full, 0)), list.len(frames))
+let a19 = core.assert_equal("frames_since(last) returns none", list.len(journal.frames_since(j_full, list.len(frames))), 0)
+
+// append determinism: same frames produce same journal hash
+let j_a = journal.append_frames(journal.empty_journal("ws", "main.fard"), frames, reducerHash)
+let j_b = journal.append_frames(journal.empty_journal("ws", "main.fard"), frames, reducerHash)
+let a20 = core.assert_equal("journal append determinism", journal.journal_hash(j_a), journal.journal_hash(j_b))
+
+core.ok(core.test_summary("journal", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20]))

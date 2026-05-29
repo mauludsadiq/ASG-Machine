@@ -1,0 +1,74 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+
+fn make_entry(frame, prevFrameHash, reducerHash) {
+  {
+    frameId: frame.frameId,
+    globalVersion: frame.globalVersion,
+    prevFrameHash: prevFrameHash,
+    frameHash: frame.frameHash,
+    transactionResults: frame.transactionResults,
+    projectionDiffs: frame.derivedEffects.projectionDiffs,
+    reducerHash: reducerHash
+  }
+}
+
+fn entry_hash(entry) {
+  core.digest({
+    frameId: entry.frameId,
+    globalVersion: entry.globalVersion,
+    prevFrameHash: entry.prevFrameHash,
+    frameHash: entry.frameHash,
+    reducerHash: entry.reducerHash
+  })
+}
+
+fn empty_journal(workspaceId, fileId) {
+  { workspaceId: workspaceId, fileId: fileId, entries: [], headHash: "" }
+}
+
+fn append_frame(journal, frame, reducerHash) {
+  let prevHash = if list.len(journal.entries) == 0 then "" else list.last(journal.entries).frameHash in
+  let entry = make_entry(frame, prevHash, reducerHash) in
+  { ...journal, entries: list.concat([journal.entries, [entry]]), headHash: entry.frameHash }
+}
+
+fn append_frames(journal, frames, reducerHash) {
+  list.fold(frames, journal, fn(j, fr) { append_frame(j, fr, reducerHash) })
+}
+
+fn verify_chain(journal) {
+  let n = list.len(journal.entries) in
+  if n == 0 then core.ok(true) else
+  let ids_ok = list.all(list.range(0, n), fn(i) { list.get(journal.entries, i).frameId == i + 1 }) in
+  let chain_ok = list.all(list.range(1, n), fn(i) {
+    let prev = list.get(journal.entries, i - 1) in
+    let curr = list.get(journal.entries, i) in
+    curr.prevFrameHash == prev.frameHash
+  }) in
+  let head_ok = journal.headHash == list.last(journal.entries).frameHash in
+  if !ids_ok then core.err("JOURNAL_ID_SEQUENCE_BROKEN", { entryCount: n }) else
+  if !chain_ok then core.err("JOURNAL_CHAIN_BROKEN", { entryCount: n }) else
+  if !head_ok then core.err("JOURNAL_HEAD_MISMATCH", { head: journal.headHash }) else
+  core.ok(true)
+}
+
+fn replay_journal(journal, initialText) {
+  let n = list.len(journal.entries) in
+  if n == 0 then core.ok({ text: initialText, globalVersion: 0, frameCount: 0 }) else
+  let last_entry = list.last(journal.entries) in
+  let last_diffs = last_entry.projectionDiffs in
+  let final_text = if list.len(last_diffs) == 0 then initialText else list.last(last_diffs).newText in
+  core.ok({ text: final_text, globalVersion: last_entry.globalVersion, frameCount: n })
+}
+
+fn frames_since(journal, fromFrameId) {
+  list.filter(journal.entries, fn(e) { e.frameId > fromFrameId })
+}
+
+fn journal_hash(journal) {
+  core.digest({ workspaceId: journal.workspaceId, fileId: journal.fileId, headHash: journal.headHash, entryCount: list.len(journal.entries) })
+}
+
+export { make_entry, entry_hash, empty_journal, append_frame, append_frames, verify_chain, replay_journal, frames_since, journal_hash }
