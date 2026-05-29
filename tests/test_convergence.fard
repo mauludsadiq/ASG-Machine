@@ -1,3 +1,19 @@
 import("../src/harness") as harness
+import("../src/core") as core
 
-harness.convergence_check(50, 5)
+let c = harness.convergence_check(50, 5)
+
+let assertions = [
+  core.assert_equal("result ok", c.t, "ok"),
+  core.assert_equal("semantic ok", c.v.ok, true),
+  core.assert_equal("projection invariant", c.v.projectionInvariant.ok, true),
+  core.assert_equal("frame invariant", c.v.frameInvariant.ok, true),
+  core.assert_equal("replica==server text", c.v.replicaText == c.v.serverText, true),
+  core.assert_equal("projection hash ok", c.v.projectionInvariant.hashOk, true),
+  core.assert_equal("projection text ok", c.v.projectionInvariant.textOk, true),
+  core.assert_equal("frame ids ok", c.v.frameInvariant.frameIdsOk, true),
+  core.assert_equal("frame hashes ok", c.v.frameInvariant.hashesOk, true),
+  core.assert_equal("server text non-empty", c.v.serverText == "", false)
+]
+
+core.ok(core.test_summary("convergence-50-5", assertions))
