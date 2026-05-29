@@ -1,0 +1,70 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/journal") as journal
+import("../src/snapshot") as snap
+import("../src/runtime") as runtime
+import("../src/core") as core
+import("std/list") as list
+
+let store = asg.sample_store()
+let rt0 = runtime.init_runtime("ws", "main.fard", store)?
+let initialText = runtime.server_text(rt0)
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r")
+
+// init_runtime
+let a1 = core.assert_equal("runtime workspaceId", rt0.workspaceId, "ws")
+let a2 = core.assert_equal("runtime initial text non-empty", initialText == "", false)
+let a3 = core.assert_equal("runtime initial log empty", list.len(rt0.log.entries), 0)
+
+// submit_tx
+let r1 = runtime.submit_tx(rt0, tx1)?
+let a4 = core.assert_equal("submit status APPLIED", r1.status, "APPLIED")
+let a5 = core.assert_equal("submit ingressSeq", r1.ingressSeq, 1)
+let a6 = core.assert_equal("log grows after submit", list.len(r1.runtime.log.entries), 1)
+let a7 = core.assert_equal("server text changes after submit", runtime.server_text(r1.runtime) == initialText, false)
+
+// duplicate tx
+let r_dup = runtime.submit_tx(r1.runtime, tx1)?
+let a8 = core.assert_equal("duplicate status", r_dup.status, "DUPLICATE")
+let a9 = core.assert_equal("duplicate does not grow log", list.len(r_dup.runtime.log.entries), 1)
+let a10 = core.assert_equal("duplicate does not change text", runtime.server_text(r_dup.runtime), runtime.server_text(r1.runtime))
+
+// submit_many
+let r_many = runtime.submit_many(rt0, [tx1, tx2, tx3])?
+let a11 = core.assert_equal("submit_many result count", list.len(r_many.results), 3)
+let a12 = core.assert_equal("submit_many all applied", list.all(r_many.results, fn(r) { r.status == "APPLIED" }), true)
+let a13 = core.assert_equal("submit_many log size", list.len(r_many.runtime.log.entries), 3)
+
+// poll_frames from 0
+let pf = runtime.poll_frames(r_many.runtime, 0)?
+let a14 = core.assert_equal("poll_frames count > 0", pf.count > 0, true)
+let a15 = core.assert_equal("poll_frames headFrameId > 0", pf.headFrameId > 0, true)
+
+// poll_frames since last
+let pf2 = runtime.poll_frames(r_many.runtime, pf.headFrameId)?
+let a16 = core.assert_equal("poll_frames since head returns none", pf2.count, 0)
+
+// get_snapshot
+let s1 = runtime.get_snapshot(r_many.runtime)?
+let a17 = core.assert_equal("snapshot version > 0", s1.version > 0, true)
+let a18 = core.assert_equal("snapshot projectionText matches server", s1.projectionText, runtime.server_text(r_many.runtime))
+let sv = snap.verify_snapshot(s1)?
+let a19 = core.assert_equal("snapshot verifies ok", sv, true)
+
+// runtime_hash deterministic
+let h1 = runtime.runtime_hash(r_many.runtime)
+let h2 = runtime.runtime_hash(r_many.runtime)
+let a20 = core.assert_equal("runtime_hash deterministic", h1, h2)
+
+// same txs produce same runtime_hash
+let r_same = runtime.submit_many(rt0, [tx1, tx2, tx3])?
+let a21 = core.assert_equal("same txs same runtime_hash", runtime.runtime_hash(r_many.runtime), runtime.runtime_hash(r_same.runtime))
+
+// journal chain valid after submits
+let vc = journal.verify_chain(r_many.runtime.consumer.journal)?
+let a22 = core.assert_equal("journal chain valid", vc, true)
+
+core.ok(core.test_summary("runtime", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22]))

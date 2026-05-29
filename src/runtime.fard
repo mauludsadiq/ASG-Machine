@@ -1,0 +1,85 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./asg") as asg
+import("./reducer") as reducer
+import("./frame") as frm
+import("./gateway") as gateway
+import("./ordered_log") as olog
+import("./reducer_consumer") as rc
+import("./frame_bus") as fbus
+import("./journal") as journal
+import("./snapshot") as snap
+
+fn init_runtime(workspaceId, fileId, store) {
+  let rr = reducer.init(workspaceId, fileId, store) in
+  if core.is_err(rr) then rr else
+  let mach = frm.make_machine(rr.v, 10, 0) in
+  let g = gateway.empty_gateway(workspaceId) in
+  let log = olog.empty_log(workspaceId) in
+  let jrnl = journal.empty_journal(workspaceId, fileId) in
+  let consumer = rc.make_consumer(workspaceId, "runtime", mach, jrnl) in
+  let bus = { ...fbus.empty_bus(workspaceId), fileId: fileId } in
+  core.ok({
+    workspaceId: workspaceId,
+    fileId: fileId,
+    gateway: g,
+    log: log,
+    consumer: consumer,
+    bus: bus
+  })
+}
+
+fn submit_tx(runtime, tx) {
+  let r = gateway.accept_tx(runtime.gateway, tx) in
+  if core.is_err(r) then r else
+  let acceptance = r.v in
+  if acceptance.status == "DUPLICATE" then
+    core.ok({ runtime: runtime, status: "DUPLICATE", ingressSeq: null }) else
+  let drained = gateway.drain_inbox(acceptance.gateway) in
+  let log2 = olog.append_many(runtime.log, drained.txs) in
+  let rt2 = { ...runtime, gateway: drained.gateway, log: log2 } in
+  let cr = rc.consume_all(rt2.consumer, log2, 10) in
+  if core.is_err(cr) then cr else
+  let c2 = cr.v in
+  let prevCount = list.len(runtime.consumer.machine.frames) in
+  let newFrames = list.drop(c2.machine.frames, prevCount) in
+  let bus2 = fbus.publish_frames(rt2.bus, newFrames) in
+  core.ok({ runtime: { ...rt2, consumer: c2, bus: bus2 }, status: "APPLIED", ingressSeq: acceptance.ingressSeq })
+}
+
+fn submit_many(runtime, txs_list) {
+  list.fold(txs_list, core.ok({ runtime: runtime, results: [] }), fn(acc, tx) {
+    if core.is_err(acc) then acc else
+    let r = submit_tx(acc.v.runtime, tx) in
+    if core.is_err(r) then r else
+    let res = { txId: tx.id, status: r.v.status, ingressSeq: r.v.ingressSeq } in
+    core.ok({ runtime: r.v.runtime, results: list.concat([acc.v.results, [res]]) })
+  })
+}
+
+fn poll_frames(runtime, sinceFrameId) {
+  let entries = journal.frames_since(runtime.consumer.journal, sinceFrameId) in
+  let headFrameId = if list.len(runtime.consumer.machine.frames) == 0 then 0 else list.last(runtime.consumer.machine.frames).frameId in
+  core.ok({ frames: entries, count: list.len(entries), headFrameId: headFrameId })
+}
+
+fn get_snapshot(runtime) {
+  let s = snap.make_snapshot(runtime.consumer.machine, runtime.consumer.journal) in
+  core.ok(s)
+}
+
+fn server_text(runtime) {
+  runtime.consumer.machine.reducer.projection.text
+}
+
+fn runtime_hash(runtime) {
+  core.digest({
+    workspaceId: runtime.workspaceId,
+    logSize: list.len(runtime.log.entries),
+    journalHead: runtime.consumer.journal.headHash,
+    globalVersion: runtime.consumer.machine.reducer.globalVersion
+  })
+}
+
+export { init_runtime, submit_tx, submit_many, poll_frames, get_snapshot, server_text, runtime_hash }
