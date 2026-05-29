@@ -18,18 +18,22 @@ converge to identical text — provably, not probabilistically.
 FARD is a general-purpose deterministic functional language with a tree-walking
 interpreter (fardrun). This project implements the full ASG machine stack in FARD:
 store, reducer, projection, frame broadcast, client replay, HTTP/WS contracts,
-in-memory server, live HTTP server, and durable persistence across restarts.
+in-memory server, live HTTP server, durable persistence, and authenticated access control.
 
 ## Run
 
-    # Durable server (persists state across restarts)
+    # Authenticated durable server (port 7778)
+    mkdir -p data/server_auth
+    fardrun run --program server_auth.fard --out out/server_auth
+
+    # Durable server without auth (port 7777)
     mkdir -p data/server
     fardrun run --program server_durable.fard --out out/server
 
-    # Stateless server (no persistence)
-    fardrun run --program server.fard --out out/server
+    # Auth smoke test
+    ./smoke_auth.sh
 
-    # Smoke test (server must be running on port 7777)
+    # Basic smoke test
     ./smoke.sh
 
     # Restart persistence test
@@ -38,33 +42,31 @@ in-memory server, live HTTP server, and durable persistence across restarts.
     # Fast test suite
     fardrun run --program tests/run_all.fard --out out/tests_all
 
-    # E2E smoke test
-    fardrun run --program tests/test_e2e_smoke.fard --out out/t_smoke
-
 ## Verified Behavior
 
-    ./smoke.sh output:
-    GET /health    -> ok: True version: 0.7.0 workspaces: 1
-    POST /tx       -> status: ACCEPTED ingressSeq: 1
-    POST /tx dup   -> status: DUPLICATE
-    GET /frames    -> count: 2 headFrameId: 2
-    GET /snapshot  -> version: 2 frameId: 2
-    GET /frames?since=head -> count since head: 0
+    ./smoke_auth.sh:
+    GET /health         -> ok (no auth required)
+    POST /tx alice      -> ACCEPTED seq:1  (owner)
+    POST /tx bob        -> ACCEPTED seq:2  (editor)
+    POST /tx carol      -> 403             (viewer)
+    POST /tx unauth     -> 401             (no token)
+    GET /snapshot carol -> version:2 text:main_auth
+    GET /frames carol   -> count:2 head:2
+    Replayed nonce      -> 409
 
-    ./restart_test.sh output:
-    First boot:    tx1 ACCEPTED, snapshot v:1 text:main_v1
-    After restart: snapshot v:1 text:main_v1, frames:1 head:1
+    ./restart_test.sh:
+    After restart: snapshot v:1 text:main_v1 frames:1 head:1
 
 ## Architecture
 
     POST /tx
-    -> server_durable.fard (net.serve + mutex)
+    -> server_auth.fard (net.serve + mutex)
+    -> server_auth.fard (token validation + ACL check)
     -> server_process.fard (route + parse)
     -> server.fard (workspace manager)
     -> request_router.fard (HTTP handlers)
     -> runtime.fard (gateway + log + consumer + bus + journal)
     -> workspace_state.fard (fs snapshot + journal persistence)
-    -> reducer / asg / projection / frame
 
 ## Modules
 
@@ -117,13 +119,21 @@ in-memory server, live HTTP server, and durable persistence across restarts.
     server_durable.fard              net.serve with disk persistence
     restart_test.sh                  restart persistence smoke test
 
+    Phase H — Auth
+    src/identity.fard                user/client/token, nonce store
+    src/acl.fard                     workspace roles: owner/editor/viewer
+    src/signed_request.fard          Bearer token extraction, verify, replay rejection
+    src/server_auth.fard             auth-wrapped request handler
+    server_auth.fard                 authenticated durable server (port 7778)
+    smoke_auth.sh                    auth smoke test
+
     main.fard                        batch demo
     tests/*.fard                     executable test programs
 
 ## Scale
 
-    5,153 lines of FARD across 75 files
-    625 invariant assertions
+    5,632 lines of FARD across 82 files
+    671 invariant assertions
     0 failures
 
 | Phase | Modules | Purpose |
@@ -135,6 +145,7 @@ in-memory server, live HTTP server, and durable persistence across restarts.
 | E Network Runtime | 3 | runtime, request_router, server |
 | F Live Server | 3 | server_process, server.fard, smoke.sh |
 | G Durable Server | 2 | workspace_state, server_durable.fard |
+| H Auth | 4 | identity, acl, signed_request, server_auth |
 
 ## Proof of Execution
 
@@ -143,13 +154,12 @@ Fast suite:
     fard_run_digest=sha256:975140f4ac0c929164c702d9595ae6f448bd71bbe6eec93fa185b7f55cc953c3
     { overallOk: true, phase: C, passed: 12, failed: 0 }
 
-E2E smoke:
+Auth smoke:
 
-    fard_run_digest=sha256:2fe090cd69a98f44266143fe903f7b30af9697172a76004b3e744ed4c69e062d
-    { ok: true, passed: 26, failed: 0 }
+    ./smoke_auth.sh -> === PASS ===
+    All 8 checks: health, owner submit, editor submit, viewer 403,
+    unauthenticated 401, viewer read, frames count==head, replay 409
 
 Restart persistence:
 
-    ./restart_test.sh
-    After restart: snapshot v:1 text:main_v1 frames:1 head:1
-    === DONE ===
+    ./restart_test.sh -> After restart: v:1 text:main_v1 frames:1 head:1
