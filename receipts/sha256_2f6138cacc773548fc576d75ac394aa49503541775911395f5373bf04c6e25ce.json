@@ -1,0 +1,1 @@
+{"derived_from":[],"hm_receipt":null,"output":{"compute_node_exists":true,"final_text":"fn compute() {  let x = counter + 1\n  return x\n}\n","fn_renamed":false,"frames_produced":1,"initial_text":"fn main() {  let x = 1\n  return x\n}\n","stmt_node_exists":true,"structurally_valid":false},"run_id":"sha256:2f6138cacc773548fc576d75ac394aa49503541775911395f5373bf04c6e25ce"}

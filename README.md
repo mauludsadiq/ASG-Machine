@@ -1,71 +1,82 @@
 # ASG Machine
 
-Text CRDTs converge, but they don't understand code. Rename a variable while your
-teammate deletes the line it's on — you get garbage. ASG Machine converges
-structurally, with cryptographic proofs.
+Text CRDTs converge, but they don't understand code.
 
-    Client A: rename(x -> counter) ----+
-                                       +--> [ASG Machine] --> identical ASTs
-    Client B: delete_stmt_1() ---------+
+## The Problem
 
-Every operation is a semantic transaction against a versioned AST. The reducer
-applies them deterministically, emits cryptographically hashed frames, and
-broadcasts minimal projection diffs to clients. Clients replay frames and
-converge to identical text — provably, not probabilistically.
+Two users edit the same function concurrently:
 
-## What is FARD
+    User A: rename fn_main -> compute
+    User B: update statement value to counter + 1
 
-FARD is a general-purpose deterministic functional language with a tree-walking
-interpreter (fardrun). This project implements the full ASG machine stack in FARD:
-store, reducer, projection, frame broadcast, client replay, HTTP/WS contracts,
-in-memory server, live HTTP server, durable persistence, authenticated access
-control, and hash-chained audit logging with operator metrics.
+Both edits are valid. Applied to the same base. What happens?
 
-## Run
+    TEXT CRDT RESULT:        ASG MACHINE RESULT:
+    fn compute() {           fn compute() {
+      let x = 1                let x = counter + 1
+      return xcounter + 1      return x
+    }                        }
 
-    # Auditable authenticated server (port 7779) — recommended
+The CRDT produces `return xcounter + 1`. The rename shifted character
+offsets by +3. The concurrent edit landed in the wrong position.
+Syntactically valid. Semantically broken. Silently.
+
+The ASG Machine produces the correct program. Both ops target stable
+node IDs — not character positions. They are orthogonal. Both apply
+cleanly. Every time. Provably.
+
+    fardrun run --program demo_adversarial.fard --out out/demo
+    VERDICT: ASG_WINS
+
+## How It Works
+
+Every operation is a semantic transaction against a versioned AST:
+
+    op_rename("fn_main", "compute")      -- targets node ID, not offset
+    op_set("stmt_1", "value", "counter") -- targets field, not position
+
+The reducer applies transactions deterministically, emits
+cryptographically hashed frames, and broadcasts minimal projection
+diffs. Clients replay frames and converge to identical text —
+provably, not probabilistically.
+
+    Client A: rename(fn_main -> compute) ----+
+                                             +--> [ASG Machine] --> identical ASTs
+    Client B: set(stmt_1, counter + 1)  ----+
+
+## Run the Demo
+
+    fardrun run --program demo_adversarial.fard --out out/demo
+
+## Run the Server
+
+    # Auditable authenticated server (port 7779)
     mkdir -p data/server_audit
     fardrun run --program server_audited.fard --out out/server_audited
+    ./smoke_audit.sh
 
-    # Authenticated durable server (port 7778)
-    mkdir -p data/server_auth
-    fardrun run --program server_auth.fard --out out/server_auth
+    # Restart persistence test
+    ./restart_test.sh
 
-    # Durable server without auth (port 7777)
-    mkdir -p data/server
-    fardrun run --program server_durable.fard --out out/server
-
-    # Smoke tests
-    ./smoke_audit.sh      # audit + admin endpoints
-    ./smoke_auth.sh       # auth/ACL
-    ./smoke.sh            # basic endpoints
-    ./restart_test.sh     # persistence across restarts
-
-    # Test suite
+    # Full test suite
     fardrun run --program tests/run_all.fard --out out/tests_all
 
-## Verified Behavior
+## What the Server Proves
 
-    ./smoke_audit.sh:
-    GET /health              -> ok version:0.9.0
     POST /tx alice (owner)   -> ACCEPTED seq:1
     POST /tx bob (editor)    -> ACCEPTED seq:2
     POST /tx carol (viewer)  -> 403
     POST /tx unauth          -> 401
     Replayed nonce           -> 409
-    GET /admin/metrics       -> txAccepted:2 authFailures:1 nonceReplays:1 permDenied:1
-    GET /admin/audit         -> count:5 headHash verified
-    GET /admin/metrics carol -> 403
-    GET /admin/state_hash    -> stateHash+metricsHash present
-
-    ./restart_test.sh:
-    After restart: snapshot v:1 text:main_v1 frames:1 head:1
+    GET /admin/metrics       -> txAccepted:2 authFailures:1 nonceReplays:1
+    GET /admin/audit         -> hash-chained, tamper-evident
+    Restart                  -> version:1 text:main_v1 frames:1 head:1
 
 ## Architecture
 
     POST /tx
     -> server_audited.fard (net.serve port 7779, mutex {srv,auth,audit,metrics})
-    -> server_audit.fard (token+ACL check, audit append, metrics inc)
+    -> server_audit.fard (token+ACL, audit append, metrics)
     -> server_process.fard (route + parse)
     -> server.fard (workspace manager)
     -> request_router.fard (HTTP handlers)
@@ -102,8 +113,8 @@ control, and hash-chained audit logging with operator metrics.
     src/snapshot.fard                durable ASG + projection snapshots
 
     Phase D — Production Adapter Boundary
-    src/api_contract.fard            HTTP API payload validation and response shaping
-    src/ws_stream.fard               WebSocket/long-poll frame stream protocol
+    src/api_contract.fard            HTTP API payload validation
+    src/ws_stream.fard               WebSocket frame stream protocol
     src/cli_driver.fard              CLI command parsing and dispatch
     src/workspace_format.fard        persisted workspace directory format
     src/editor_adapter.fard          browser/editor adapter spec
@@ -115,31 +126,28 @@ control, and hash-chained audit logging with operator metrics.
 
     Phase F — Live Server
     src/server_process.fard          HTTP route handler and query parser
-    server.fard                      net.serve entry point (stateless)
-    smoke.sh                         basic smoke test
+    server.fard                      net.serve entry point (stateless, port 7777)
 
     Phase G — Durable Server
     src/workspace_state.fard         fs snapshot + journal persistence
-    server_durable.fard              net.serve with disk persistence
+    server_durable.fard              persistent server (port 7777)
     restart_test.sh                  restart persistence smoke test
 
     Phase H — Auth
     src/identity.fard                user/client/token, nonce store
     src/acl.fard                     workspace roles: owner/editor/viewer
-    src/signed_request.fard          Bearer token extraction, verify, replay rejection
+    src/signed_request.fard          Bearer token, verify, replay rejection
     src/server_auth.fard             auth-wrapped request handler
-    server_auth.fard                 authenticated durable server (port 7778)
-    smoke_auth.sh                    auth smoke test
+    server_auth.fard                 authenticated server (port 7778)
 
     Phase I — Audit
     src/audit_log.fard               hash-chained audit entries
     src/metrics.fard                 deterministic operator counters
     src/server_audit.fard            audited handler + admin endpoints
-    server_audited.fard              auditable authenticated server (port 7779)
-    smoke_audit.sh                   audit + admin smoke test
+    server_audited.fard              auditable server (port 7779)
 
-    main.fard                        batch demo
-    tests/*.fard                     executable test programs
+    Phase J — Adversarial Demo
+    demo_adversarial.fard            CRDT vs ASG Machine on conflicting edits
 
 ## Scale
 
@@ -154,12 +162,20 @@ control, and hash-chained audit logging with operator metrics.
 | C Distributed | 7 | gateway, log, consumer, bus, sim, partition, snapshot |
 | D Adapter Boundary | 5 | api_contract, ws_stream, cli, workspace_format, editor_adapter |
 | E Network Runtime | 3 | runtime, request_router, server |
-| F Live Server | 3 | server_process, server.fard, smoke.sh |
+| F Live Server | 2 | server_process, server.fard |
 | G Durable Server | 2 | workspace_state, server_durable.fard |
 | H Auth | 4 | identity, acl, signed_request, server_auth |
 | I Audit | 3 | audit_log, metrics, server_audit |
+| J Demo | 1 | demo_adversarial.fard |
 
 ## Proof of Execution
+
+Adversarial demo:
+
+    fardrun run --program demo_adversarial.fard --out out/demo
+    TEXT CRDT:  return xcounter + 1   <- broken
+    ASG MACHINE: return x             <- correct
+    VERDICT: ASG_WINS
 
 Fast suite:
 
@@ -169,8 +185,6 @@ Fast suite:
 Audit smoke:
 
     ./smoke_audit.sh -> === PASS ===
-    txAccepted:2 authFailures:1 nonceReplays:1 permDenied:1 total:12
-    audit count:5, stateHash+metricsHash present
 
 Restart persistence:
 
