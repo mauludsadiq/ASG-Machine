@@ -1,0 +1,75 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./asg") as asg
+import("./journal") as journal
+import("./snapshot") as snapshot
+
+// Workspace directory format.
+// Defines the canonical on-disk layout as deterministic records.
+// No real filesystem I/O — path computation and manifest validation only.
+
+fn workspace_root(baseDir, workspaceId) {
+  str.concat([baseDir, "/", workspaceId])
+}
+
+fn journal_path(baseDir, workspaceId) {
+  str.concat([workspace_root(baseDir, workspaceId), "/journal.ndjson"])
+}
+
+fn snapshot_path(baseDir, workspaceId, version) {
+  str.concat([workspace_root(baseDir, workspaceId), "/snapshots/v", str.from(version), ".json"])
+}
+
+fn log_path(baseDir, workspaceId) {
+  str.concat([workspace_root(baseDir, workspaceId), "/ordered_log.ndjson"])
+}
+
+fn meta_path(baseDir, workspaceId) {
+  str.concat([workspace_root(baseDir, workspaceId), "/meta.json"])
+}
+
+fn receipts_path(baseDir, workspaceId) {
+  str.concat([workspace_root(baseDir, workspaceId), "/receipts"])
+}
+
+fn make_manifest(workspaceId, fileId, version, journalEntryCount, snapshotVersion, asgHash, projectionHash) {
+  {
+    workspaceId: workspaceId,
+    fileId: fileId,
+    version: version,
+    journalEntryCount: journalEntryCount,
+    snapshotVersion: snapshotVersion,
+    asgHash: asgHash,
+    projectionHash: projectionHash,
+    manifestHash: core.digest({ workspaceId: workspaceId, fileId: fileId, version: version, journalEntryCount: journalEntryCount, asgHash: asgHash, projectionHash: projectionHash })
+  }
+}
+
+fn verify_manifest(manifest) {
+  let expected = core.digest({ workspaceId: manifest.workspaceId, fileId: manifest.fileId, version: manifest.version, journalEntryCount: manifest.journalEntryCount, asgHash: manifest.asgHash, projectionHash: manifest.projectionHash }) in
+  if manifest.manifestHash != expected then
+    core.err("MANIFEST_HASH_MISMATCH", { expected: expected, actual: manifest.manifestHash }) else
+  core.ok(true)
+}
+
+fn manifest_from_machine(workspaceId, fileId, machine, jrnl) {
+  let store = machine.reducer.store in
+  let proj = machine.reducer.projection in
+  let snap = snapshot.make_snapshot(machine, jrnl) in
+  make_manifest(workspaceId, fileId, machine.reducer.globalVersion, list.len(jrnl.entries), rec.getOr(snap, "frameId", 0), asg.snapshot_hash(store), proj.hash)
+}
+
+fn directory_layout(baseDir, workspaceId, version) {
+  {
+    root: workspace_root(baseDir, workspaceId),
+    journal: journal_path(baseDir, workspaceId),
+    log: log_path(baseDir, workspaceId),
+    meta: meta_path(baseDir, workspaceId),
+    receipts: receipts_path(baseDir, workspaceId),
+    snapshot: snapshot_path(baseDir, workspaceId, version)
+  }
+}
+
+export { workspace_root, journal_path, snapshot_path, log_path, meta_path, receipts_path, make_manifest, verify_manifest, manifest_from_machine, directory_layout }

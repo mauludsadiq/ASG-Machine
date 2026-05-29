@@ -1,0 +1,65 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/journal") as journal
+import("../src/snapshot") as snap
+import("../src/workspace_format") as wf
+import("../src/core") as core
+import("std/list") as list
+import("std/str") as str
+
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let mach = frm.make_machine(rr, 3, 10)
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let m = frm.run_batches(mach, [tx1])?
+let jrnl = journal.append_frames(journal.empty_journal("ws", "main.fard"), m.frames, asg.snapshot_hash(m.reducer.store))
+
+// path helpers
+let a1 = core.assert_equal("workspace_root", wf.workspace_root("/data", "ws"), "/data/ws")
+let a2 = core.assert_equal("journal_path", wf.journal_path("/data", "ws"), "/data/ws/journal.ndjson")
+let a3 = core.assert_equal("snapshot_path", wf.snapshot_path("/data", "ws", 5), "/data/ws/snapshots/v5.json")
+let a4 = core.assert_equal("log_path", wf.log_path("/data", "ws"), "/data/ws/ordered_log.ndjson")
+let a5 = core.assert_equal("meta_path", wf.meta_path("/data", "ws"), "/data/ws/meta.json")
+let a6 = core.assert_equal("receipts_path", wf.receipts_path("/data", "ws"), "/data/ws/receipts")
+
+// directory_layout
+let layout = wf.directory_layout("/data", "ws", 3)
+let a7 = core.assert_equal("layout root", layout.root, "/data/ws")
+let a8 = core.assert_equal("layout journal", layout.journal, "/data/ws/journal.ndjson")
+let a9 = core.assert_equal("layout snapshot versioned", layout.snapshot, "/data/ws/snapshots/v3.json")
+
+// make_manifest
+let manifest = wf.make_manifest("ws", "main.fard", 10, 5, 2, "sha256:abc", "sha256:def")
+let a10 = core.assert_equal("manifest workspaceId", manifest.workspaceId, "ws")
+let a11 = core.assert_equal("manifest version", manifest.version, 10)
+let a12 = core.assert_equal("manifest has hash", str.starts_with(manifest.manifestHash, "sha256:"), true)
+
+// verify_manifest passes
+let v1 = wf.verify_manifest(manifest)?
+let a13 = core.assert_equal("verify manifest ok", v1, true)
+
+// verify_manifest fails on tamper
+let tampered = { ...manifest, manifestHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+let v2 = wf.verify_manifest(tampered)
+let a14 = core.assert_equal("tampered manifest is err", v2.t, "err")
+let a15 = core.assert_equal("tampered manifest code", v2.code, "MANIFEST_HASH_MISMATCH")
+
+// manifest_from_machine
+let m2 = wf.manifest_from_machine("ws", "main.fard", m, jrnl)
+let a16 = core.assert_equal("manifest from machine version", m2.version, m.reducer.globalVersion)
+let a17 = core.assert_equal("manifest journalEntryCount", m2.journalEntryCount, list.len(jrnl.entries))
+let a18 = core.assert_equal("manifest asgHash", m2.asgHash, asg.snapshot_hash(m.reducer.store))
+let a19 = core.assert_equal("manifest projectionHash", m2.projectionHash, m.reducer.projection.hash)
+
+// manifest hash deterministic
+let h1 = wf.make_manifest("ws", "main.fard", 10, 5, 2, "sha256:abc", "sha256:def").manifestHash
+let h2 = wf.make_manifest("ws", "main.fard", 10, 5, 2, "sha256:abc", "sha256:def").manifestHash
+let a20 = core.assert_equal("manifest hash deterministic", h1, h2)
+
+// different manifests different hashes
+let h3 = wf.make_manifest("ws", "main.fard", 11, 5, 2, "sha256:abc", "sha256:def").manifestHash
+let a21 = core.assert_equal("different manifest different hash", h1 == h3, false)
+
+core.ok(core.test_summary("workspace_format", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21]))
