@@ -1,0 +1,95 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./transactions") as txs
+
+// POST /tx
+// Request: { id, workspaceId, dependencies, preconditions, operation, lamportTimestamp, replicaId }
+// Response: { status, ingressSeq, txId } | { error, code, detail }
+
+fn validate_post_tx_request(body) {
+  let required = ["id", "workspaceId", "dependencies", "preconditions", "operation", "lamportTimestamp", "replicaId"] in
+  let missing = list.filter(required, fn(k) { !rec.has(body, k) }) in
+  if list.len(missing) > 0 then
+    core.err("MISSING_FIELDS", { fields: missing }) else
+  if body.id == "" then core.err("INVALID_FIELD", { field: "id", reason: "must not be empty" }) else
+  if body.workspaceId == "" then core.err("INVALID_FIELD", { field: "workspaceId", reason: "must not be empty" }) else
+  if body.replicaId == "" then core.err("INVALID_FIELD", { field: "replicaId", reason: "must not be empty" }) else
+  core.ok(txs.tx(body.id, body.workspaceId, body.dependencies, body.preconditions, body.operation, body.lamportTimestamp, body.replicaId))
+}
+
+fn post_tx_response_ok(ingressSeq, txId) {
+  { status: "ACCEPTED", ingressSeq: ingressSeq, txId: txId }
+}
+
+fn post_tx_response_duplicate(txId) {
+  { status: "DUPLICATE", ingressSeq: null, txId: txId }
+}
+
+fn post_tx_response_err(code, detail) {
+  { status: "ERROR", error: code, detail: detail }
+}
+
+// GET /frames?since=N
+// Request: { workspaceId, since }
+// Response: { frames, count, headFrameId }
+
+fn validate_get_frames_request(params) {
+  if !rec.has(params, "workspaceId") then
+    core.err("MISSING_FIELDS", { fields: ["workspaceId"] }) else
+  if !rec.has(params, "since") then
+    core.err("MISSING_FIELDS", { fields: ["since"] }) else
+  if params.since < 0 then
+    core.err("INVALID_FIELD", { field: "since", reason: "must be >= 0" }) else
+  core.ok(true)
+}
+
+fn get_frames_response(frames, headFrameId) {
+  { frames: frames, count: list.len(frames), headFrameId: headFrameId }
+}
+
+// GET /snapshot
+// Request: { workspaceId }
+// Response: { version, frameId, asgHash, projectionText, projectionHash, journalHead, snapshotHash }
+
+fn validate_get_snapshot_request(params) {
+  if !rec.has(params, "workspaceId") then
+    core.err("MISSING_FIELDS", { fields: ["workspaceId"] }) else
+  core.ok(true)
+}
+
+fn get_snapshot_response(snap) {
+  {
+    version: snap.version,
+    frameId: rec.getOr(snap, "frameId", 0),
+    asgHash: snap.asgHash,
+    projectionText: snap.projectionText,
+    projectionHash: snap.projectionHash,
+    journalHead: snap.journalHead,
+    snapshotHash: snap.snapshotHash
+  }
+}
+
+// GET /health
+// Response: { ok, version, workspaceCount, headFrameId }
+
+fn get_health_response(version, workspaceCount, headFrameId) {
+  { ok: true, version: version, workspaceCount: workspaceCount, headFrameId: headFrameId }
+}
+
+// Generic HTTP error envelope
+fn http_error(status, code, message) {
+  { httpStatus: status, error: code, message: message }
+}
+
+// Route a request to the correct handler by method and path
+fn route(method, path) {
+  if method == "POST" && path == "/tx" then core.ok("post_tx") else
+  if method == "GET" && path == "/frames" then core.ok("get_frames") else
+  if method == "GET" && path == "/snapshot" then core.ok("get_snapshot") else
+  if method == "GET" && path == "/health" then core.ok("get_health") else
+  core.err("NOT_FOUND", { method: method, path: path })
+}
+
+export { validate_post_tx_request, post_tx_response_ok, post_tx_response_duplicate, post_tx_response_err, validate_get_frames_request, get_frames_response, validate_get_snapshot_request, get_snapshot_response, get_health_response, http_error, route }

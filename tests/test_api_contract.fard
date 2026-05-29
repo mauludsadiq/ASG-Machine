@@ -1,0 +1,94 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/journal") as journal
+import("../src/snapshot") as snap
+import("../src/api_contract") as api
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+// Build a real machine for snapshot/frames responses
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let mach = frm.make_machine(rr, 3, 10)
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let m = frm.run_batches(mach, [tx1])?
+let jrnl = journal.append_frames(journal.empty_journal("ws", "main.fard"), m.frames, asg.snapshot_hash(m.reducer.store))
+let snapshot = snap.make_snapshot(m, jrnl)
+
+// POST /tx — valid request
+let valid_body = { id: "tx1", workspaceId: "ws", dependencies: [], preconditions: [], operation: txs.op_rename("fn_main", "main_v1"), lamportTimestamp: 1, replicaId: "r_a" }
+let r1 = api.validate_post_tx_request(valid_body)
+let a1 = core.assert_equal("valid post_tx request ok", r1.t, "ok")
+let a2 = core.assert_equal("valid post_tx returns tx", r1.v.id, "tx1")
+
+// POST /tx — missing field
+let bad_body = { id: "tx2", workspaceId: "ws" }
+let r2 = api.validate_post_tx_request(bad_body)
+let a3 = core.assert_equal("missing fields is err", r2.t, "err")
+let a4 = core.assert_equal("missing fields code", r2.code, "MISSING_FIELDS")
+
+// POST /tx — empty id rejected
+let empty_id_body = { id: "", workspaceId: "ws", dependencies: [], preconditions: [], operation: txs.op_rename("fn_main", "x"), lamportTimestamp: 1, replicaId: "r" }
+let r3 = api.validate_post_tx_request(empty_id_body)
+let a5 = core.assert_equal("empty id is err", r3.t, "err")
+let a6 = core.assert_equal("empty id code", r3.code, "INVALID_FIELD")
+
+// POST /tx response shapes
+let resp_ok = api.post_tx_response_ok(1, "tx1")
+let a7 = core.assert_equal("accepted response status", resp_ok.status, "ACCEPTED")
+let a8 = core.assert_equal("accepted response ingressSeq", resp_ok.ingressSeq, 1)
+let resp_dup = api.post_tx_response_duplicate("tx1")
+let a9 = core.assert_equal("duplicate response status", resp_dup.status, "DUPLICATE")
+let a10 = core.assert_equal("duplicate response ingressSeq null", resp_dup.ingressSeq == null, true)
+let resp_err = api.post_tx_response_err("WORKSPACE_MISMATCH", "wrong workspace")
+let a11 = core.assert_equal("error response status", resp_err.status, "ERROR")
+
+// GET /frames — valid params
+let frames_params = { workspaceId: "ws", since: 0 }
+let r4 = api.validate_get_frames_request(frames_params)
+let a12 = core.assert_equal("valid get_frames ok", r4.t, "ok")
+let frames_resp = api.get_frames_response(m.frames, list.last(m.frames).frameId)
+let a13 = core.assert_equal("frames response count", frames_resp.count, list.len(m.frames))
+let a14 = core.assert_equal("frames response headFrameId", frames_resp.headFrameId, list.last(m.frames).frameId)
+
+// GET /frames — negative since rejected
+let bad_frames = { workspaceId: "ws", since: -1 }
+let r5 = api.validate_get_frames_request(bad_frames)
+let a15 = core.assert_equal("negative since is err", r5.t, "err")
+
+// GET /snapshot — valid
+let snap_params = { workspaceId: "ws" }
+let r6 = api.validate_get_snapshot_request(snap_params)
+let a16 = core.assert_equal("valid get_snapshot ok", r6.t, "ok")
+let snap_resp = api.get_snapshot_response(snapshot)
+let a17 = core.assert_equal("snapshot response version", snap_resp.version, snapshot.version)
+let a18 = core.assert_equal("snapshot response snapshotHash", snap_resp.snapshotHash, snapshot.snapshotHash)
+
+// GET /snapshot — missing workspaceId
+let bad_snap = {}
+let r7 = api.validate_get_snapshot_request(bad_snap)
+let a19 = core.assert_equal("missing workspaceId is err", r7.t, "err")
+
+// GET /health response
+let health = api.get_health_response("0.3.0", 1, list.last(m.frames).frameId)
+let a20 = core.assert_equal("health ok", health.ok, true)
+let a21 = core.assert_equal("health version", health.version, "0.3.0")
+let a22 = core.assert_equal("health workspaceCount", health.workspaceCount, 1)
+
+// route()
+let a23 = core.assert_equal("route POST /tx", api.route("POST", "/tx").v, "post_tx")
+let a24 = core.assert_equal("route GET /frames", api.route("GET", "/frames").v, "get_frames")
+let a25 = core.assert_equal("route GET /snapshot", api.route("GET", "/snapshot").v, "get_snapshot")
+let a26 = core.assert_equal("route GET /health", api.route("GET", "/health").v, "get_health")
+let a27 = core.assert_equal("route unknown is err", api.route("DELETE", "/tx").t, "err")
+let a28 = core.assert_equal("route unknown error code", api.route("DELETE", "/tx").code, "NOT_FOUND")
+
+// http_error envelope
+let he = api.http_error(404, "NOT_FOUND", "workspace not found")
+let a29 = core.assert_equal("http_error status", he.httpStatus, 404)
+let a30 = core.assert_equal("http_error code", he.error, "NOT_FOUND")
+
+core.ok(core.test_summary("api_contract", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30]))
