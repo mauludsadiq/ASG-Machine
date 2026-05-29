@@ -1,0 +1,69 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./rope") as rope
+
+fn init(workspaceId, fileId, initialText) {
+  let rp = rope.from_text(initialText)
+  core.ok({
+    workspaceId: workspaceId,
+    fileId: fileId,
+    globalVersion: 0,
+    text: initialText,
+    rope: rp,
+    appliedFrameIds: {}
+  })
+}
+
+fn apply_diff(state, diff) {
+  if diff.workspaceId != state.workspaceId then
+    core.err("WORKSPACE_MISMATCH", { expected: state.workspaceId, got: diff.workspaceId }) else
+  if diff.fileId != state.fileId then
+    core.err("FILE_MISMATCH", { expected: state.fileId, got: diff.fileId }) else
+  let newRope = rope.replace_range(state.rope, diff.start, diff.end, str.concat(["frame:", str.from(diff.frameId)]), diff.newText) in
+  if core.is_err(newRope) then newRope else
+  let newText = rope.text(newRope.v) in
+  core.ok({ ...state, rope: newRope.v, text: newText })
+}
+
+fn apply_diffs(state, diffs) {
+  list.fold(diffs, core.ok(state), fn(acc, diff) {
+    if core.is_err(acc) then acc else
+    let s2 = acc.v in
+    apply_diff(s2, diff)
+  })
+}
+
+fn apply_frame(state, fr) {
+  let fid = str.from(fr.frameId) in
+  if rec.has(state.appliedFrameIds, fid) then
+    core.ok({ ...state, _skipped: fr.frameId }) else
+  if fr.frameId <= state.globalVersion then
+    core.err("STALE_FRAME", { frameId: fr.frameId, clientVersion: state.globalVersion }) else
+  if fr.frameId != state.globalVersion + 1 then
+    core.err("FRAME_GAP", { frameId: fr.frameId, expected: state.globalVersion + 1, got: fr.frameId }) else
+  let diffs = fr.derivedEffects.projectionDiffs in
+  let r = apply_diffs(state, diffs) in
+  if core.is_err(r) then r else
+  let newState = r.v in
+  core.ok({
+    ...newState,
+    globalVersion: fr.frameId,
+    appliedFrameIds: rec.set(state.appliedFrameIds, fid, true)
+  })
+}
+
+fn apply_frames(state, frames) {
+  list.fold(frames, core.ok(state), fn(acc, fr) {
+    if core.is_err(acc) then acc else
+    let s2 = acc.v in
+    apply_frame(s2, fr)
+  })
+}
+
+fn state_hash(state) {
+  core.digest({ workspaceId: state.workspaceId, fileId: state.fileId, globalVersion: state.globalVersion, text: state.text })
+}
+
+export { init, apply_diff, apply_diffs, apply_frame, apply_frames, state_hash }

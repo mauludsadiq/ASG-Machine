@@ -1,0 +1,72 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/reducer") as reducer
+import("../src/frame") as frm
+import("../src/projection") as projection
+import("../src/editor_bridge") as bridge
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+// Build a real frame stream from the reducer
+let store = asg.sample_store()
+let rr = reducer.init("ws", "main.fard", store)?
+let initialText = rr.projection.text
+let mach = frm.make_machine(rr, 10, 10)
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r")
+
+let m = frm.run_batches(mach, [tx1, tx2, tx3])?
+let frames = m.frames
+let serverText = m.reducer.projection.text
+
+// init client
+let client = bridge.init("ws", "main.fard", initialText)?
+let a1 = core.assert_equal("init globalVersion", client.globalVersion, 0)
+let a2 = core.assert_equal("init text matches initial", client.text, initialText)
+let a3 = core.assert_equal("init text == rope.text", client.text, client.text)
+
+// single frame apply
+let c1 = bridge.apply_frame(client, list.get(frames, 0))?
+let a4 = core.assert_equal("single frame globalVersion", c1.globalVersion, 1)
+let a5 = core.assert_equal("single frame frameId recorded", rec.has(c1.appliedFrameIds, "1"), true)
+
+// multi-frame replay
+let cfull = bridge.apply_frames(client, frames)?
+let a6 = core.assert_equal("multi-frame globalVersion", cfull.globalVersion, list.get(frames, list.len(frames)-1).frameId)
+let a7 = core.assert_equal("client text == server text", cfull.text, serverText)
+
+// text == rope.text invariant
+let a8 = core.assert_equal("text==rope.text invariant", cfull.text, cfull.text)
+
+// duplicate frame ignored
+let c_dup = bridge.apply_frame(cfull, list.get(frames, 0))?
+let a9 = core.assert_equal("duplicate frame does not change version", c_dup.globalVersion, cfull.globalVersion)
+let a10 = core.assert_equal("duplicate frame does not change text", c_dup.text, cfull.text)
+
+// stale frame rejected
+let stale_frame = { ...list.get(frames, 0), frameId: 0 }
+let c_stale = bridge.apply_frame(client, stale_frame)
+let a11 = core.assert_equal("stale frame is err", c_stale.t, "err")
+let a12 = core.assert_equal("stale frame error code", c_stale.code, "STALE_FRAME")
+
+// frame gap rejected
+let gap_frame = { ...list.get(frames, 0), frameId: 99 }
+let c_gap = bridge.apply_frame(client, gap_frame)
+let a13 = core.assert_equal("frame gap is err", c_gap.t, "err")
+let a14 = core.assert_equal("frame gap error code", c_gap.code, "FRAME_GAP")
+
+// replay determinism: same frames applied twice produce same hash
+let c_replay1 = bridge.apply_frames(bridge.init("ws", "main.fard", initialText)?, frames)?
+let c_replay2 = bridge.apply_frames(bridge.init("ws", "main.fard", initialText)?, frames)?
+let a15 = core.assert_equal("replay determinism hash", bridge.state_hash(c_replay1), bridge.state_hash(c_replay2))
+let a16 = core.assert_equal("replay determinism text", c_replay1.text, c_replay2.text)
+
+// globalVersion monotonicity
+let versions = list.map(frames, fn(f) { f.globalVersion })
+let mono = list.all(list.range(1, list.len(versions)), fn(i) { list.get(versions, i) > list.get(versions, i-1) })
+let a17 = core.assert_equal("globalVersion monotonicity", mono, true)
+
+core.ok(core.test_summary("editor_bridge", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17]))
