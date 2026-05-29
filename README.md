@@ -23,30 +23,46 @@ cryptographic receipt tying inputs to outputs.
 
 ## Architecture
 
-    ordered semantic transaction stream
-    -> deterministic reducer
-    -> persistent ASG store
-    -> incremental projection engine
-    -> reducer frame broadcast
-    -> clients / VFS / LSP / sandbox consumers
+    client transaction ingress
+    -> gateway (dedup, validate, sequence)
+    -> ordered log (total order)
+    -> reducer consumer (deterministic frames)
+    -> frame bus (broadcast)
+    -> editor bridge clients (replay)
+    -> journal (persistence)
+    -> recovery (catch-up)
+    -> VFS / LSP mirrors
 
 ## Modules
 
+    Phase A — Correctness Core
     src/core.fard                    shared result/assert/hash helpers
     src/asg.fard                     ASG store and structural mutation
     src/rope.fard                    segment rope and text range replacement
-    src/projection.fard              ASG -> text projection and incremental mutation
+    src/projection.fard              ASG -> text projection
     src/incremental_projection.fard  minimal subtree diff engine
     src/transactions.fard            transaction/precondition evaluation
     src/reducer.fard                 deterministic reducer
     src/frame.fard                   batch frame machine and replay
+    src/harness.fard                 convergence harness
+
+    Phase B — Client Runtime
     src/editor_bridge.fard           deterministic client-side frame replay
-    src/journal.fard                 deterministic replay journal with hash chaining
+    src/journal.fard                 replay log with hash chaining
     src/recovery.fard                client catch-up from arbitrary version
     src/vfs.fard                     versioned document snapshots
     src/lsp_bridge.fard              LSP mirror with deterministic diagnostics
-    src/harness.fard                 deterministic convergence harness
-    main.fard                        executable demo summary
+
+    Phase C — Distributed Runtime
+    src/gateway.fard                 tx ingress: validate, dedup, sequence
+    src/ordered_log.fard             total-order tx log
+    src/reducer_consumer.fard        log -> frames -> journal
+    src/frame_bus.fard               frame broadcast and subscriber delivery
+    src/distributed_sim.fard         end-to-end pipeline simulator
+    src/partition.fard               workspace isolation and routing
+    src/snapshot.fard                durable ASG + projection snapshots
+
+    main.fard                        executable demo
     tests/*.fard                     executable test programs
 
 ## Run
@@ -62,11 +78,13 @@ cryptographic receipt tying inputs to outputs.
 
 ## Scale
 
-    2,390 lines of FARD across 38 files
-    261 invariant assertions
+    3,239 lines of FARD across 52 files
+    353 invariant assertions
     0 failures
 
 ## Test Suite
+
+Phase A:
 
 | File | Assertions | Coverage |
 |---|---|---|
@@ -83,67 +101,80 @@ cryptographic receipt tying inputs to outputs.
 | test_pending_resolution.fard | 4 | PENDING -> auto-retry when dependency arrives |
 | test_convergence.fard | 10 | 50-tx convergence, all invariants hard-asserted |
 | test_replay.fard | 10 | empty/single/multi frame replay, text and hash |
+
+Phase B:
+
+| File | Assertions | Coverage |
+|---|---|---|
 | test_editor_bridge.fard | 17 | single/multi frame apply, stale/gap rejection, determinism |
 | test_journal.fard | 20 | append, chain integrity, corruption detection, replay |
 | test_recovery.fard | 15 | catch-up replay, stale rejection, determinism |
 | test_multi_client_convergence.fard | 16 | 5 clients, duplicate/partial/reconnect scenarios |
 | test_vfs.fard | 13 | snapshots, frame apply, journal sync, hash determinism |
 | test_lsp_bridge.fard | 12 | open/sync/close, diagnostics, unopened rejection |
+
+Phase C:
+
+| File | Assertions | Coverage |
+|---|---|---|
+| test_gateway.fard | 19 | accept, dedup, malformed rejection, ingress order |
+| test_ordered_log.fard | 18 | append order, read_from, commit_offset, hash |
+| test_reducer_consumer.fard | 9 | same log same frames, partial+resume, chain integrity |
+| test_frame_bus.fard | 15 | subscribe, deliver, duplicate ignored, catch-up |
+| test_distributed_sim.fard | 11 | 5-client end-to-end, journal==broadcast, recovery |
+| test_partition.fard | 8 | workspace isolation, routing, wrong-ws rejection |
+| test_snapshot.fard | 12 | hash determinism, corrupt rejection, restore, suffix replay |
+
+Infrastructure:
+
+| File | Assertions | Coverage |
+|---|---|---|
+| run_all.fard | 12 | fast full suite, Phase C proof object |
 | test_reducer_failure.fard | - | failure suite via harness |
 | test_reducer_edges.fard | - | edge cases via harness |
-| run_all.fard | 12 | fast full suite with hard invariant assertions |
 | test_stress_convergence.fard | 8 | 100-tx and batch-1 convergence (~80s) |
 
 ## Documented Behaviors
 
 **Failure semantics:**
 
-- rename-after-delete => FAILED (precondition EXISTS fails on deleted node)
-- kind mismatch => FAILED (precondition KIND_MATCH fails)
-- missing dependency => PENDING (dependencies not yet in processedOps)
+- rename-after-delete => FAILED
+- kind mismatch => FAILED
+- missing dependency => PENDING (auto-retried when dependency arrives)
 - duplicate tx id => DUPLICATE (idempotent, state unchanged)
-
-**Pending resolution:**
-
-The reducer automatically retries PENDING transactions when their dependencies
-arrive in a subsequent batch. A transaction that was PENDING in batch N will
-appear as APPLIED or FAILED in the batch where its dependency is first processed.
-
-**Idempotency:**
-
-Transaction IDs are tracked in processedOps across the lifetime of the machine.
-Submitting the same tx.id twice in the same batch or across batches produces
-DUPLICATE on the second occurrence. State and hash are unaffected.
 
 **Editor bridge frame tracking:**
 
-The editor bridge tracks frames by frameId (sequence number). Frames are rejected
-as STALE_FRAME if frameId <= clientVersion, and as FRAME_GAP if frameId !=
-clientVersion + 1. Duplicate frames are silently skipped without error.
+Frames tracked by frameId. STALE_FRAME if frameId <= clientVersion.
+FRAME_GAP if frameId != clientVersion + 1. Duplicates silently skipped.
 
 **Incremental projection diffs:**
 
-minimal_projection_diff() computes the span of the affected projection subtree
-and emits a diff covering only that span. Falls back to full-document replacement
-when the target node is deleted or not found in the new projection.
-Unchanged subtree hashes are preserved across mutations.
+minimal_projection_diff() emits a diff covering only the affected subtree span.
+Falls back to full-document replacement when target node deleted or not found.
 
 **Replay journal:**
 
-Each journal entry chains prevFrameHash -> frameHash. verify_chain() detects
-broken sequences, broken hash links, and headHash mismatches. replay_journal()
-reconstructs final text from journal entries alone — no snapshots required.
+Each entry chains prevFrameHash -> frameHash. verify_chain() detects broken
+sequences, broken links, and headHash mismatches. replay_journal() reconstructs
+final text from journal entries alone.
 
-**Client recovery:**
+**Gateway:**
 
-recovery_state() computes missing frames for any client version. replay_since()
-applies them deterministically via the editor bridge. check_recovery_valid()
-rejects clients claiming a version ahead of the server.
+Validates tx shape, checks workspaceId match, deduplicates by tx.id, assigns
+monotonic ingressSeq. Wrong-workspace txs are marked REJECTED in accept_many
+results without propagating error.
 
-**validate_projection error paths:**
+**Workspace partitions:**
 
-- PROJECTION_TEXT_MISMATCH: projection text does not match a full rebuild.
-- PROJECTION_HASH_MISMATCH: text matches but hash does not.
+Each workspace has its own gateway, ordered log, reducer consumer, journal, frame
+bus, and client set. Same tx.id is allowed in different workspaces.
+
+**Snapshots:**
+
+make_snapshot() captures store, projection, version, frameId, and asgHash.
+snapshotHash covers all fields. verify_snapshot() rejects tampering.
+restore_and_replay() restores from snapshot then replays journal suffix.
 
 ## Store Fixtures
 
@@ -154,27 +185,11 @@ rejects clients claiming a version ahead of the server.
 ## Proof of Execution
 
     fardrun run --program tests/run_all.fard --out out/tests_all
-    fard_run_digest=sha256:ff7c0609f5d095c749a5dfec25c2e0994417ffccf3205c6b06a309c4bf999449
+    fard_run_digest=sha256:975140f4ac0c929164c702d9595ae6f448bd71bbe6eec93fa185b7f55cc953c3
 
-Verified properties:
+    { overallOk: true, phase: "C", passed: 12, failed: 0 }
 
-- Projection convergence: PASS
-- Replica/server text convergence: PASS
-- Projection hash invariants: PASS
-- Frame sequencing invariants: PASS
-- Deterministic reducer replay: PASS
-- Semantic failure handling: PASS
-- Editor bridge stale/gap rejection: PASS
-- Editor bridge replay determinism: PASS
-- Incremental projection minimal diffs: PASS
-- Incremental projection hash preservation: PASS
-- Journal chain integrity and corruption detection: PASS
-- Client recovery from arbitrary version: PASS
-- 5-client convergence simulation: PASS
-- VFS document sync determinism: PASS
-- LSP mirror sync and diagnostics: PASS
-
-Stress suite (separate, ~80s):
+Stress suite:
 
     fardrun run --program tests/test_stress_convergence.fard --out out/t_stress
 
