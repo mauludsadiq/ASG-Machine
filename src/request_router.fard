@@ -1,0 +1,72 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./api_contract") as api
+import("./runtime") as rt
+import("./snapshot") as snap
+import("./journal") as journal
+
+// Request router: maps HTTP-ish requests to runtime calls.
+// Returns deterministic response records.
+// No real network — pure request/response dispatch.
+
+fn handle_post_tx(runtime, body) {
+  let v = api.validate_post_tx_request(body) in
+  if core.is_err(v) then
+    core.ok({ httpStatus: 400, body: api.post_tx_response_err(v.code, v.data) }) else
+  let tx = v.v in
+  if tx.workspaceId != runtime.workspaceId then
+    core.ok({ httpStatus: 400, body: api.post_tx_response_err("WORKSPACE_MISMATCH", { expected: runtime.workspaceId, got: tx.workspaceId }), runtime: runtime }) else
+  let r = rt.submit_tx(runtime, tx) in
+  if core.is_err(r) then
+    core.ok({ httpStatus: 500, body: api.post_tx_response_err(r.code, r.data), runtime: runtime }) else
+  let status = r.v.status in
+  let httpStatus = if status == "DUPLICATE" then 200 else 201 in
+  let body2 =
+    if status == "DUPLICATE" then api.post_tx_response_duplicate(tx.id) else
+    api.post_tx_response_ok(r.v.ingressSeq, tx.id) in
+  core.ok({ httpStatus: httpStatus, body: body2, runtime: r.v.runtime })
+}
+
+fn handle_get_frames(runtime, params) {
+  let v = api.validate_get_frames_request(params) in
+  if core.is_err(v) then
+    core.ok({ httpStatus: 400, body: api.http_error(400, v.code, "invalid params") }) else
+  if params.workspaceId != runtime.workspaceId then
+    core.ok({ httpStatus: 404, body: api.http_error(404, "WORKSPACE_NOT_FOUND", params.workspaceId) }) else
+  let pf = rt.poll_frames(runtime, params.since) in
+  if core.is_err(pf) then
+    core.ok({ httpStatus: 500, body: api.http_error(500, pf.code, "poll failed") }) else
+  core.ok({ httpStatus: 200, body: api.get_frames_response(pf.v.frames, pf.v.headFrameId) })
+}
+
+fn handle_get_snapshot(runtime, params) {
+  let v = api.validate_get_snapshot_request(params) in
+  if core.is_err(v) then
+    core.ok({ httpStatus: 400, body: api.http_error(400, v.code, "invalid params") }) else
+  if params.workspaceId != runtime.workspaceId then
+    core.ok({ httpStatus: 404, body: api.http_error(404, "WORKSPACE_NOT_FOUND", params.workspaceId) }) else
+  let s = rt.get_snapshot(runtime) in
+  if core.is_err(s) then
+    core.ok({ httpStatus: 500, body: api.http_error(500, s.code, "snapshot failed") }) else
+  core.ok({ httpStatus: 200, body: api.get_snapshot_response(s.v) })
+}
+
+fn handle_get_health(runtime, version) {
+  let frameCount = list.len(runtime.consumer.machine.frames) in
+  let headFrameId = if frameCount == 0 then 0 else list.last(runtime.consumer.machine.frames).frameId in
+  core.ok({ httpStatus: 200, body: api.get_health_response(version, 1, headFrameId) })
+}
+
+fn dispatch_request(runtime, method, path, params_or_body, version) {
+  let route = api.route(method, path) in
+  if core.is_err(route) then
+    core.ok({ httpStatus: 404, body: api.http_error(404, "NOT_FOUND", path), runtime: runtime }) else
+  if route.v == "post_tx" then handle_post_tx(runtime, params_or_body) else
+  if route.v == "get_frames" then handle_get_frames(runtime, params_or_body) else
+  if route.v == "get_snapshot" then handle_get_snapshot(runtime, params_or_body) else
+  if route.v == "get_health" then handle_get_health(runtime, version) else
+  core.ok({ httpStatus: 404, body: api.http_error(404, "NOT_FOUND", path), runtime: runtime })
+}
+
+export { handle_post_tx, handle_get_frames, handle_get_snapshot, handle_get_health, dispatch_request }

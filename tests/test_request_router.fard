@@ -1,0 +1,97 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/runtime") as rt
+import("../src/request_router") as router
+import("../src/snapshot") as snap
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let store = asg.sample_store()
+let rt0 = rt.init_runtime("ws", "main.fard", store)?
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+
+let valid_body = { id: "tx1", workspaceId: "ws", dependencies: [], preconditions: [], operation: txs.op_rename("fn_main", "main_v1"), lamportTimestamp: 1, replicaId: "r" }
+
+// POST /tx success -> 201
+let r1 = router.handle_post_tx(rt0, valid_body)?
+let a1 = core.assert_equal("POST /tx status 201", r1.httpStatus, 201)
+let a2 = core.assert_equal("POST /tx body status ACCEPTED", r1.body.status, "ACCEPTED")
+let a3 = core.assert_equal("POST /tx ingressSeq", r1.body.ingressSeq, 1)
+
+// POST /tx duplicate -> 200
+let r_dup = router.handle_post_tx(r1.runtime, valid_body)?
+let a4 = core.assert_equal("POST /tx duplicate 200", r_dup.httpStatus, 200)
+let a5 = core.assert_equal("POST /tx duplicate body", r_dup.body.status, "DUPLICATE")
+
+// POST /tx malformed -> 400
+let r_bad = router.handle_post_tx(rt0, { id: "x" })?
+let a6 = core.assert_equal("POST /tx malformed 400", r_bad.httpStatus, 400)
+let a7 = core.assert_equal("POST /tx malformed status ERROR", r_bad.body.status, "ERROR")
+
+// POST /tx wrong workspace -> 400
+let wrong_body = { id: "tx_w", workspaceId: "other", dependencies: [], preconditions: [], operation: txs.op_rename("fn_main", "x"), lamportTimestamp: 1, replicaId: "r" }
+let r_ws = router.handle_post_tx(rt0, wrong_body)?
+let a8 = core.assert_equal("POST /tx wrong ws 400", r_ws.httpStatus, 400)
+
+// Submit tx1 and tx2 to build state
+let r2 = router.handle_post_tx(r1.runtime, { id: "tx2", workspaceId: "ws", dependencies: [], preconditions: [], operation: txs.op_set("stmt_1", "value", "42"), lamportTimestamp: 2, replicaId: "r" })?
+let rt2 = r2.runtime
+
+// GET /frames success -> 200
+let rf = router.handle_get_frames(rt2, { workspaceId: "ws", since: 0 })?
+let a9 = core.assert_equal("GET /frames 200", rf.httpStatus, 200)
+let a10 = core.assert_equal("GET /frames count > 0", rf.body.count > 0, true)
+let a11 = core.assert_equal("GET /frames headFrameId > 0", rf.body.headFrameId > 0, true)
+
+// GET /frames since head -> empty
+let rf2 = router.handle_get_frames(rt2, { workspaceId: "ws", since: rf.body.headFrameId })?
+let a12 = core.assert_equal("GET /frames since head empty", rf2.body.count, 0)
+
+// GET /frames negative since -> 400
+let rf_bad = router.handle_get_frames(rt2, { workspaceId: "ws", since: -1 })?
+let a13 = core.assert_equal("GET /frames bad since 400", rf_bad.httpStatus, 400)
+
+// GET /frames wrong workspace -> 404
+let rf_ws = router.handle_get_frames(rt2, { workspaceId: "other", since: 0 })?
+let a14 = core.assert_equal("GET /frames wrong ws 404", rf_ws.httpStatus, 404)
+
+// GET /snapshot success -> 200
+let rs = router.handle_get_snapshot(rt2, { workspaceId: "ws" })?
+let a15 = core.assert_equal("GET /snapshot 200", rs.httpStatus, 200)
+let a16 = core.assert_equal("GET /snapshot version > 0", rs.body.version > 0, true)
+let a17 = core.assert_equal("GET /snapshot has snapshotHash", rs.body.snapshotHash != "", true)
+
+// GET /snapshot wrong workspace -> 404
+let rs_ws = router.handle_get_snapshot(rt2, { workspaceId: "other" })?
+let a18 = core.assert_equal("GET /snapshot wrong ws 404", rs_ws.httpStatus, 404)
+
+// GET /health -> 200
+let rh = router.handle_get_health(rt2, "0.5.0")?
+let a19 = core.assert_equal("GET /health 200", rh.httpStatus, 200)
+let a20 = core.assert_equal("GET /health ok", rh.body.ok, true)
+let a21 = core.assert_equal("GET /health version", rh.body.version, "0.5.0")
+
+// dispatch_request POST /tx
+let d1 = router.dispatch_request(rt0, "POST", "/tx", valid_body, "0.5.0")?
+let a22 = core.assert_equal("dispatch POST /tx 201", d1.httpStatus, 201)
+
+// dispatch_request GET /health
+let d2 = router.dispatch_request(rt0, "GET", "/health", {}, "0.5.0")?
+let a23 = core.assert_equal("dispatch GET /health 200", d2.httpStatus, 200)
+
+// dispatch_request unknown route -> 404
+let d3 = router.dispatch_request(rt0, "DELETE", "/tx", {}, "0.5.0")?
+let a24 = core.assert_equal("dispatch unknown 404", d3.httpStatus, 404)
+
+// dispatch_request GET /frames
+let d4 = router.dispatch_request(rt2, "GET", "/frames", { workspaceId: "ws", since: 0 }, "0.5.0")?
+let a25 = core.assert_equal("dispatch GET /frames 200", d4.httpStatus, 200)
+
+// dispatch_request GET /snapshot
+let d5 = router.dispatch_request(rt2, "GET", "/snapshot", { workspaceId: "ws" }, "0.5.0")?
+let a26 = core.assert_equal("dispatch GET /snapshot 200", d5.httpStatus, 200)
+
+core.ok(core.test_summary("request_router", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26]))
