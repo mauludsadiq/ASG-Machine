@@ -1,0 +1,36 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+
+fn empty_log(workspaceId) {
+  { workspaceId: workspaceId, entries: [], nextOffset: 0, committedOffsets: {} }
+}
+
+fn append_tx(log, tx) {
+  let offset = log.nextOffset in
+  let entry = { offset: offset, tx: tx } in
+  { ...log, entries: list.concat([log.entries, [entry]]), nextOffset: offset + 1 }
+}
+
+fn append_many(log, txs) {
+  list.fold(txs, log, fn(l, tx) { append_tx(l, tx) })
+}
+
+fn read_from(log, offset) {
+  list.filter(log.entries, fn(e) { e.offset >= offset })
+}
+
+fn commit_offset(log, consumerId, offset) {
+  let current = rec.getOr(log.committedOffsets, consumerId, -1) in
+  if offset <= current then
+    core.err("OFFSET_REGRESSION", { consumerId: consumerId, current: current, attempted: offset }) else
+  if offset > log.nextOffset then
+    core.err("OFFSET_AHEAD_OF_LOG", { consumerId: consumerId, logSize: log.nextOffset, attempted: offset }) else
+  core.ok({ ...log, committedOffsets: rec.set(log.committedOffsets, consumerId, offset) })
+}
+
+fn log_hash(log) {
+  core.digest({ workspaceId: log.workspaceId, nextOffset: log.nextOffset, entryCount: list.len(log.entries) })
+}
+
+export { empty_log, append_tx, append_many, read_from, commit_offset, log_hash }

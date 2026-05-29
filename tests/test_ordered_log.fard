@@ -1,0 +1,60 @@
+import("../src/transactions") as txs
+import("../src/ordered_log") as olog
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let tx1 = txs.tx("tx1", "ws", [], [], txs.op_rename("fn_main", "main_v1"), 1, "r_a")
+let tx2 = txs.tx("tx2", "ws", [], [], txs.op_set("stmt_1", "value", "42"), 2, "r_b")
+let tx3 = txs.tx("tx3", "ws", [], [], txs.op_set("stmt_2", "value", "z"), 3, "r_a")
+
+let log0 = olog.empty_log("ws")
+
+// append order stable
+let log1 = olog.append_tx(log0, tx1)
+let log2 = olog.append_tx(log1, tx2)
+let log3 = olog.append_tx(log2, tx3)
+let a1 = core.assert_equal("entry count after 3 appends", list.len(log3.entries), 3)
+let a2 = core.assert_equal("first entry offset", list.get(log3.entries, 0).offset, 0)
+let a3 = core.assert_equal("second entry offset", list.get(log3.entries, 1).offset, 1)
+let a4 = core.assert_equal("third entry offset", list.get(log3.entries, 2).offset, 2)
+let a5 = core.assert_equal("nextOffset after 3", log3.nextOffset, 3)
+
+// append_many
+let log_m = olog.append_many(log0, [tx1, tx2, tx3])
+let a6 = core.assert_equal("append_many count", list.len(log_m.entries), 3)
+let a7 = core.assert_equal("append_many order", list.get(log_m.entries, 2).tx.id, "tx3")
+
+// read_from deterministic
+let from0 = olog.read_from(log3, 0)
+let from1 = olog.read_from(log3, 1)
+let from3 = olog.read_from(log3, 3)
+let a8 = core.assert_equal("read_from 0 returns all", list.len(from0), 3)
+let a9 = core.assert_equal("read_from 1 returns 2", list.len(from1), 2)
+let a10 = core.assert_equal("read_from 3 returns none", list.len(from3), 0)
+let a11 = core.assert_equal("read_from 1 first tx", list.get(from1, 0).tx.id, "tx2")
+
+// commit_offset
+let log_c = olog.commit_offset(log3, "consumer_1", 2)?
+let a12 = core.assert_equal("committed offset stored", rec.get(log_c.committedOffsets, "consumer_1"), 2)
+
+// offset regression rejected
+let bad_commit = olog.commit_offset(log_c, "consumer_1", 1)
+let a13 = core.assert_equal("offset regression is err", bad_commit.t, "err")
+let a14 = core.assert_equal("offset regression error code", bad_commit.code, "OFFSET_REGRESSION")
+
+// offset ahead of log rejected
+let bad_ahead = olog.commit_offset(log3, "consumer_1", 99)
+let a15 = core.assert_equal("offset ahead is err", bad_ahead.t, "err")
+let a16 = core.assert_equal("offset ahead error code", bad_ahead.code, "OFFSET_AHEAD_OF_LOG")
+
+// log_hash stable
+let h1 = olog.log_hash(log3)
+let h2 = olog.log_hash(log3)
+let a17 = core.assert_equal("log hash deterministic", h1, h2)
+
+// different logs have different hashes
+let h3 = olog.log_hash(log2)
+let a18 = core.assert_equal("different logs different hashes", h1 == h3, false)
+
+core.ok(core.test_summary("ordered_log", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18]))
