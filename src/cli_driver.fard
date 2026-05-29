@@ -1,0 +1,92 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./asg") as asg
+import("./transactions") as txs
+import("./distributed_sim") as dsim
+import("./api_contract") as api
+import("./snapshot") as snap
+import("./journal") as journal
+
+// CLI driver: parse argv, dispatch commands, return structured result.
+// No real I/O — deterministic command parsing and dispatch contract.
+
+fn parse_args(args) {
+  if list.len(args) == 0 then core.err("NO_COMMAND", {}) else
+  let cmd = list.get(args, 0) in
+  let rest = list.drop(args, 1) in
+  core.ok({ command: cmd, args: rest })
+}
+
+fn parse_flags(args) {
+  list.fold(args, {}, fn(acc, arg) {
+    if str.starts_with(arg, "--") then
+      let kv = str.split(str.slice(arg, 2, str.len(arg)), "=") in
+      if list.len(kv) == 2 then
+        rec.set(acc, list.get(kv, 0), list.get(kv, 1)) else
+        rec.set(acc, list.get(kv, 0), "true")
+    else acc
+  })
+}
+
+fn cmd_health(flags) {
+  let version = rec.getOr(flags, "version", "0.4.0") in
+  core.ok(api.get_health_response(version, 0, 0))
+}
+
+fn cmd_submit_tx(flags) {
+  if !rec.has(flags, "workspace") then core.err("MISSING_FLAG", { flag: "workspace" }) else
+  if !rec.has(flags, "id") then core.err("MISSING_FLAG", { flag: "id" }) else
+  if !rec.has(flags, "op") then core.err("MISSING_FLAG", { flag: "op" }) else
+  if !rec.has(flags, "node") then core.err("MISSING_FLAG", { flag: "node" }) else
+  let op = rec.get(flags, "op") in
+  let node = rec.get(flags, "node") in
+  let value = rec.getOr(flags, "value", "") in
+  let operation =
+    if op == "rename" then core.ok(txs.op_rename(node, value)) else
+    if op == "set" then
+      let key = rec.getOr(flags, "key", "value") in
+      core.ok(txs.op_set(node, key, value)) else
+    if op == "delete" then core.ok(txs.op_delete(node)) else
+    core.err("UNKNOWN_OP", { op: op }) in
+  if core.is_err(operation) then operation else
+  let replica = rec.getOr(flags, "replica", "cli") in
+  let ts = 1 in
+  let tx = txs.tx(rec.get(flags, "id"), rec.get(flags, "workspace"), [], [], operation.v, ts, replica) in
+  core.ok({ submitted: tx, status: "QUEUED" })
+}
+
+fn cmd_frames(flags) {
+  if !rec.has(flags, "workspace") then core.err("MISSING_FLAG", { flag: "workspace" }) else
+  let since = rec.getOr(flags, "since", "0") in
+  let params = { workspaceId: rec.get(flags, "workspace"), since: 0 } in
+  let v = api.validate_get_frames_request(params) in
+  if core.is_err(v) then v else
+  core.ok({ command: "frames", workspaceId: params.workspaceId, since: params.since })
+}
+
+fn cmd_snapshot(flags) {
+  if !rec.has(flags, "workspace") then core.err("MISSING_FLAG", { flag: "workspace" }) else
+  let params = { workspaceId: rec.get(flags, "workspace") } in
+  let v = api.validate_get_snapshot_request(params) in
+  if core.is_err(v) then v else
+  core.ok({ command: "snapshot", workspaceId: params.workspaceId })
+}
+
+fn dispatch(parsed) {
+  let flags = parse_flags(parsed.args) in
+  if parsed.command == "health" then cmd_health(flags) else
+  if parsed.command == "submit" then cmd_submit_tx(flags) else
+  if parsed.command == "frames" then cmd_frames(flags) else
+  if parsed.command == "snapshot" then cmd_snapshot(flags) else
+  core.err("UNKNOWN_COMMAND", { command: parsed.command })
+}
+
+fn run_cli(args) {
+  let parsed = parse_args(args) in
+  if core.is_err(parsed) then parsed else
+  dispatch(parsed.v)
+}
+
+export { parse_args, parse_flags, cmd_health, cmd_submit_tx, cmd_frames, cmd_snapshot, dispatch, run_cli }

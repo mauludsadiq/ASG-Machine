@@ -1,0 +1,76 @@
+import("../src/cli_driver") as cli
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+// parse_args
+let a1 = core.assert_equal("no args is err", cli.parse_args([]).t, "err")
+let a2 = core.assert_equal("no args code", cli.parse_args([]).code, "NO_COMMAND")
+let p1 = cli.parse_args(["health"])?
+let a3 = core.assert_equal("parse command", p1.command, "health")
+let a4 = core.assert_equal("parse empty args", list.len(p1.args), 0)
+let p2 = cli.parse_args(["submit", "--workspace=ws", "--id=tx1", "--op=rename", "--node=fn_main", "--value=main_v1"])?
+let a5 = core.assert_equal("parse command with flags", p2.command, "submit")
+let a6 = core.assert_equal("parse flag count", list.len(p2.args), 5)
+
+// parse_flags
+let flags = cli.parse_flags(["--workspace=ws", "--id=tx1", "--op=rename", "--node=fn_main", "--value=main_v1"])
+let a7 = core.assert_equal("flag workspace", rec.get(flags, "workspace"), "ws")
+let a8 = core.assert_equal("flag id", rec.get(flags, "id"), "tx1")
+let a9 = core.assert_equal("flag op", rec.get(flags, "op"), "rename")
+let a10 = core.assert_equal("flag node", rec.get(flags, "node"), "fn_main")
+let a11 = core.assert_equal("flag value", rec.get(flags, "value"), "main_v1")
+
+// boolean flag
+let bool_flags = cli.parse_flags(["--verbose"])
+let a12 = core.assert_equal("bool flag value", rec.get(bool_flags, "verbose"), "true")
+
+// cmd_health
+let h = cli.run_cli(["health"])?
+let a13 = core.assert_equal("health ok", h.ok, true)
+let a14 = core.assert_equal("health version default", h.version, "0.4.0")
+
+// cmd_submit rename
+let s1 = cli.run_cli(["submit", "--workspace=ws", "--id=tx1", "--op=rename", "--node=fn_main", "--value=main_v1"])?
+let a15 = core.assert_equal("submit status", s1.status, "QUEUED")
+let a16 = core.assert_equal("submit tx id", s1.submitted.id, "tx1")
+let a17 = core.assert_equal("submit tx workspaceId", s1.submitted.workspaceId, "ws")
+let a18 = core.assert_equal("submit op kind", s1.submitted.operation.kind, "RENAME_NODE")
+
+// cmd_submit set
+let s2 = cli.run_cli(["submit", "--workspace=ws", "--id=tx2", "--op=set", "--node=stmt_1", "--key=value", "--value=42"])?
+let a19 = core.assert_equal("submit set op kind", s2.submitted.operation.kind, "SET_PROPERTY")
+
+// cmd_submit delete
+let s3 = cli.run_cli(["submit", "--workspace=ws", "--id=tx3", "--op=delete", "--node=stmt_1"])?
+let a20 = core.assert_equal("submit delete op kind", s3.submitted.operation.kind, "DELETE_NODE")
+
+// cmd_submit missing flag
+let bad_submit = cli.run_cli(["submit", "--workspace=ws"])
+let a21 = core.assert_equal("submit missing flag is err", bad_submit.t, "err")
+let a22 = core.assert_equal("submit missing flag code", bad_submit.code, "MISSING_FLAG")
+
+// cmd_submit unknown op
+let bad_op = cli.run_cli(["submit", "--workspace=ws", "--id=tx4", "--op=explode", "--node=fn_main"])
+let a23 = core.assert_equal("unknown op is err", bad_op.t, "err")
+let a24 = core.assert_equal("unknown op code", bad_op.code, "UNKNOWN_OP")
+
+// cmd_frames
+let f1 = cli.run_cli(["frames", "--workspace=ws"])?
+let a25 = core.assert_equal("frames command", f1.command, "frames")
+let a26 = core.assert_equal("frames workspaceId", f1.workspaceId, "ws")
+
+// cmd_frames missing workspace
+let bad_frames = cli.run_cli(["frames"])
+let a27 = core.assert_equal("frames missing workspace is err", bad_frames.t, "err")
+
+// cmd_snapshot
+let sn1 = cli.run_cli(["snapshot", "--workspace=ws"])?
+let a28 = core.assert_equal("snapshot command", sn1.command, "snapshot")
+
+// unknown command
+let bad_cmd = cli.run_cli(["explode"])
+let a29 = core.assert_equal("unknown command is err", bad_cmd.t, "err")
+let a30 = core.assert_equal("unknown command code", bad_cmd.code, "UNKNOWN_COMMAND")
+
+core.ok(core.test_summary("cli_driver", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30]))
