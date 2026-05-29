@@ -1,96 +1,86 @@
-// Phase J — Adversarial Convergence Demo
-// Shows exactly where text CRDTs break on concurrent structural edits
-// and proves ASG Machine stays valid.
-
 import("src/asg") as asg
 import("src/transactions") as txs
 import("src/reducer") as reducer
-import("src/distributed_sim") as dsim
 import("src/frame") as frm
 import("src/core") as core
 import("std/list") as list
 import("std/str") as str
 
-// The adversarial scenario:
-// User A renames fn_main -> compute (structural: touches the fn node ID)
-// User B sets stmt_1 value (structural: touches the stmt node)
-// Concurrent at lamport 1 from different replicas.
-
-// What a text CRDT does:
-// It sees two character-level diffs against the same base text.
-// "fn main()" -> "fn compute()" and "let x = 1" -> "let x = counter + 1"
-// Text merge is positional. If the rename shifts offsets,
-// the stmt edit lands in the wrong position or duplicates text.
-// Result: syntactically broken or semantically inconsistent program.
-
-// What ASG Machine does:
-// Each op targets a node ID. Node IDs are stable.
-// The rename changes fn_main.name. The set changes stmt_1.value.
-// These are orthogonal fields. Both apply cleanly.
-// Result: well-formed program, every time.
+// Adversarial scenario: concurrent structural edits
+// User A: rename fn_main -> compute  (changes "main" at offset 3, len 4)
+// User B: set stmt_1 value to "counter + 1"  (changes "1" at offset 19, len 1)
+// Both computed against base: "fn main() {  let x = 1\n  return x\n}\n"
 
 let store = asg.sample_store()
 let rr = reducer.init("ws", "main.fard", store)?
-let initial_text = rr.projection.text
+let base = rr.projection.text
 let mach = frm.make_machine(rr, 10, 0)
 
-// Concurrent ops from two replicas
+// === ASG MACHINE: both ops applied to node IDs ===
 let tx_a = txs.tx("tx_a", "ws", [], [txs.pre_exists("fn_main")],
   txs.op_rename("fn_main", "compute"), 1, "replica_a")
 let tx_b = txs.tx("tx_b", "ws", [], [txs.pre_exists("stmt_1")],
   txs.op_set("stmt_1", "value", "counter + 1"), 1, "replica_b")
 
-// Run through ASG Machine
-let m1 = frm.run_batches(mach, [tx_a, tx_b])?
-let final_text = m1.reducer.projection.text
+let m_both = frm.run_batches(mach, [tx_a, tx_b])?
+let asg_result = m_both.reducer.projection.text
 
-// Structural validity checks
-// 1. Old name gone — node was renamed, old ID no longer addressable by name
-let old_node = asg.get_node(m1.reducer.store, "fn_main")
-let new_node = asg.get_node(m1.reducer.store, "compute")
-let stmt_node = asg.get_node(m1.reducer.store, "stmt_1")
+// === TEXT CRDT: character-level patches against base ===
+// Find "main" in base -> that's edit A's target
+// Find "1" (the value) in base -> that's edit B's target
 
-// 2. Text contains new name
-let text_has_compute = str.contains(final_text, "compute")
-let text_has_counter = str.contains(final_text, "counter")
-let text_no_main = !str.contains(final_text, "fn main")
+// Edit A: "main" starts at offset 3 in "fn main() {..."
+let edit_a_start = 3
+let edit_a_old = "main"
+let edit_a_new = "compute"
+let edit_a_delta = str.len(edit_a_new) - str.len(edit_a_old)
 
-// 3. Simulate what a text CRDT produces
-// Base: "fn main() {  let x = 1\n  return x\n}\n"
-// Edit A: replace "main" with "compute" at offset 3, len 4
-// Edit B: replace "1" with "counter + 1" at offset 19, len 1
-// When both applied to same base (OT/CRDT style):
-// Edit A shifts offsets by +7 ("compute" is 7, "main" is 4, delta=+3)
-// Edit B was computed against base offset 19
-// After Edit A lands first, "1" is now at offset 22 not 19
-// Text CRDT applies Edit B at wrong offset -> corruption
-let crdt_simulated = str.concat([
-  "fn compute() {  let x = 1\n",
-  "  return xcounter + 1\n",
-  "}\n"
+// Edit B: the value "1" is in "let x = 1" — find its position
+// "fn main() {  let x = 1\n"
+//  0123456789012345678901234
+// "1" is at offset 21
+let edit_b_start = 21
+let edit_b_old = "1"
+let edit_b_new = "counter + 1"
+
+// Apply edit A to base
+let after_a = str.concat([
+  str.slice(base, 0, edit_a_start),
+  edit_a_new,
+  str.slice(base, edit_a_start + str.len(edit_a_old), str.len(base))
 ])
-let crdt_broken = str.contains(crdt_simulated, "xcounter")
 
-// Results
-let asg_structurally_valid = new_node != null && stmt_node != null && text_has_compute && text_has_counter && text_no_main
+// TEXT CRDT naive: apply edit B at original offset (no transform)
+// After edit A, edit B's offset is wrong if edit A was before edit B
+let crdt_naive_start = edit_b_start
+let crdt_naive = str.concat([
+  str.slice(after_a, 0, crdt_naive_start),
+  edit_b_new,
+  str.slice(after_a, crdt_naive_start + str.len(edit_b_old), str.len(after_a))
+])
+
+// OT-corrected: transform edit B's offset by edit A's delta
+let crdt_ot_start = edit_b_start + edit_a_delta
+let crdt_ot = str.concat([
+  str.slice(after_a, 0, crdt_ot_start),
+  edit_b_new,
+  str.slice(after_a, crdt_ot_start + str.len(edit_b_old), str.len(after_a))
+])
+
+// Validate
+let asg_valid = str.contains(asg_result, "compute") && str.contains(asg_result, "counter + 1")
+let crdt_naive_broken = crdt_naive != asg_result
+let crdt_ot_matches = crdt_ot == asg_result
 
 core.ok({
-  scenario: "concurrent rename(fn_main->compute) + set(stmt_1, counter+1)",
-  initial_text: initial_text,
-  asg_machine: {
-    final_text: final_text,
-    frames_produced: list.len(m1.frames),
-    structurally_valid: asg_structurally_valid,
-    compute_node_exists: new_node != null,
-    stmt_updated: stmt_node != null,
-    text_has_new_name: text_has_compute,
-    text_has_new_value: text_has_counter,
-    old_name_gone: text_no_main
-  },
-  text_crdt_simulation: {
-    result: crdt_simulated,
-    broken: crdt_broken,
-    reason: "offset shift from rename corrupts concurrent stmt edit position"
-  },
-  verdict: if asg_structurally_valid && crdt_broken then "ASG_WINS" else "INCONCLUSIVE"
+  base: base,
+  edit_a: { what: "rename main->compute", offset: edit_a_start, delta: edit_a_delta },
+  edit_b: { what: "set value to counter+1", offset: edit_b_start },
+  asg_machine: asg_result,
+  crdt_naive: crdt_naive,
+  crdt_naive_broken: crdt_naive_broken,
+  crdt_ot: crdt_ot,
+  crdt_ot_matches_asg: crdt_ot_matches,
+  asg_valid: asg_valid,
+  verdict: if asg_valid && crdt_naive_broken then "ASG_WINS_NAIVE_CRDT_BROKEN" else if asg_valid && crdt_ot_matches then "OT_EQUIVALENT_BUT_REQUIRES_TRANSFORM" else "INCONCLUSIVE"
 })
