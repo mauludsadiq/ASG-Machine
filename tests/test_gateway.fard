@@ -1,0 +1,63 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/gateway") as gateway
+import("../src/core") as core
+import("std/list") as list
+import("std/rec") as rec
+
+let g0 = gateway.empty_gateway("ws")
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r_a")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r_b")
+let tx3 = txs.tx("tx3", "ws", [], [txs.pre_exists("stmt_2")], txs.op_set("stmt_2", "value", "z"), 3, "r_a")
+
+// valid tx accepted
+let r1 = gateway.accept_tx(g0, tx1)?
+let a1 = core.assert_equal("valid tx accepted", r1.status, "ACCEPTED")
+let a2 = core.assert_equal("ingress seq assigned", r1.ingressSeq, 1)
+let a3 = core.assert_equal("inbox count after accept", list.len(r1.gateway.inbox), 1)
+
+// duplicate tx rejected
+let r2 = gateway.accept_tx(r1.gateway, tx1)?
+let a4 = core.assert_equal("duplicate tx status", r2.status, "DUPLICATE")
+let a5 = core.assert_equal("duplicate does not grow inbox", list.len(r2.gateway.inbox), 1)
+let a6 = core.assert_equal("duplicate ingressSeq null", r2.ingressSeq == null, true)
+
+// malformed tx rejected
+let bad_tx = { id: "bad", workspaceId: "ws" }
+let r3 = gateway.accept_tx(g0, bad_tx)
+let a7 = core.assert_equal("malformed tx is err", r3.t, "err")
+let a8 = core.assert_equal("malformed tx error code", r3.code, "INVALID_TX")
+
+// wrong workspace rejected
+let wrong_ws = txs.tx("tx_w", "other_ws", [], [], txs.op_rename("fn_main", "x"), 1, "r")
+let r4 = gateway.accept_tx(g0, wrong_ws)
+let a9 = core.assert_equal("wrong workspace is err", r4.t, "err")
+let a10 = core.assert_equal("wrong workspace error code", r4.code, "WORKSPACE_MISMATCH")
+
+// ingress order deterministic
+let r5 = gateway.accept_many(g0, [tx1, tx2, tx3])?
+let seqs = list.map(r5.results, fn(r) { r.ingressSeq })
+let a11 = core.assert_equal("ingress seq 1", list.get(seqs, 0), 1)
+let a12 = core.assert_equal("ingress seq 2", list.get(seqs, 1), 2)
+let a13 = core.assert_equal("ingress seq 3", list.get(seqs, 2), 3)
+
+// accept_many with duplicate in batch
+let r6 = gateway.accept_many(g0, [tx1, tx1, tx2])?
+let a14 = core.assert_equal("batch duplicate status", list.get(r6.results, 1).status, "DUPLICATE")
+let a15 = core.assert_equal("batch inbox count", list.len(r6.gateway.inbox), 2)
+
+// gateway_hash deterministic
+let h1 = gateway.gateway_hash(r5.gateway)
+let h2 = gateway.gateway_hash(r5.gateway)
+let a16 = core.assert_equal("gateway hash deterministic", h1, h2)
+
+// drain_inbox clears inbox
+let drained = gateway.drain_inbox(r5.gateway)
+let a17 = core.assert_equal("drain returns all txs", list.len(drained.txs), 3)
+let a18 = core.assert_equal("drain clears inbox", list.len(drained.gateway.inbox), 0)
+
+// ingressSeq stamps are on drained txs
+let a19 = core.assert_equal("stamped ingressSeq on tx", list.get(drained.txs, 0).ingressSeq, 1)
+
+core.ok(core.test_summary("gateway", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19]))

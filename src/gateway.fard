@@ -1,0 +1,59 @@
+import("std/list") as list
+import("std/rec") as rec
+import("./core") as core
+import("./transactions") as txs
+
+fn empty_gateway(workspaceId) {
+  { workspaceId: workspaceId, inbox: [], processedIds: {}, ingressSequence: 0 }
+}
+
+fn validate_tx(tx) {
+  if !rec.has(tx, "id") then core.err("MISSING_FIELD", { field: "id" }) else
+  if !rec.has(tx, "workspaceId") then core.err("MISSING_FIELD", { field: "workspaceId" }) else
+  if !rec.has(tx, "operation") then core.err("MISSING_FIELD", { field: "operation" }) else
+  if !rec.has(tx, "preconditions") then core.err("MISSING_FIELD", { field: "preconditions" }) else
+  if !rec.has(tx, "dependencies") then core.err("MISSING_FIELD", { field: "dependencies" }) else
+  if !rec.has(tx, "lamportTimestamp") then core.err("MISSING_FIELD", { field: "lamportTimestamp" }) else
+  if !rec.has(tx, "replicaId") then core.err("MISSING_FIELD", { field: "replicaId" }) else
+  core.ok(true)
+}
+
+fn accept_tx(gateway, tx) {
+  let v = validate_tx(tx) in
+  if core.is_err(v) then core.err("INVALID_TX", { reason: v, txId: rec.getOr(tx, "id", "unknown") }) else
+  if tx.workspaceId != gateway.workspaceId then
+    core.err("WORKSPACE_MISMATCH", { expected: gateway.workspaceId, got: tx.workspaceId }) else
+  if rec.has(gateway.processedIds, tx.id) then
+    core.ok({ gateway: gateway, status: "DUPLICATE", ingressSeq: null }) else
+  let seq = gateway.ingressSequence + 1 in
+  let stamped = { ...tx, ingressSeq: seq } in
+  let g2 = {
+    ...gateway,
+    inbox: list.concat([gateway.inbox, [stamped]]),
+    processedIds: rec.set(gateway.processedIds, tx.id, seq),
+    ingressSequence: seq
+  } in
+  core.ok({ gateway: g2, status: "ACCEPTED", ingressSeq: seq })
+}
+
+fn accept_many(gateway, txs_list) {
+  list.fold(txs_list, core.ok({ gateway: gateway, results: [] }), fn(acc, tx) {
+    if core.is_err(acc) then acc else
+    let r = accept_tx(acc.v.gateway, tx) in
+    if core.is_err(r) then
+      let res = { txId: rec.getOr(tx, "id", "unknown"), status: "REJECTED", reason: r } in
+      core.ok({ gateway: acc.v.gateway, results: list.concat([acc.v.results, [res]]) }) else
+    let res = { txId: tx.id, status: r.v.status, ingressSeq: r.v.ingressSeq } in
+    core.ok({ gateway: r.v.gateway, results: list.concat([acc.v.results, [res]]) })
+  })
+}
+
+fn gateway_hash(gateway) {
+  core.digest({ workspaceId: gateway.workspaceId, ingressSequence: gateway.ingressSequence, inboxCount: list.len(gateway.inbox) })
+}
+
+fn drain_inbox(gateway) {
+  { txs: gateway.inbox, gateway: { ...gateway, inbox: [] } }
+}
+
+export { empty_gateway, validate_tx, accept_tx, accept_many, gateway_hash, drain_inbox }
