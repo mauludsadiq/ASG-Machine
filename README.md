@@ -52,7 +52,7 @@ concrete validation or mutation and return deterministic records.
 
 ## Test Suite
 
-| File | Assertions | Notes |
+| File | Assertions | Coverage |
 |---|---|---|
 | test_asg.fard | 19 | rename, delete, add, move, hash, duplicate rejection |
 | test_asg_move.fard | 13 | reorder, cross-parent move, delete, root rejection |
@@ -61,12 +61,17 @@ concrete validation or mutation and return deterministic records.
 | test_projection.fard | 9 | hash determinism, nodeMap totality, mutation diff |
 | test_projection_stability.fard | 11 | rename-to-same, stale invariant detection |
 | test_projection_node_count.fard | 12 | nodeMap completeness across all fixtures |
+| test_validate_projection.fard | 14 | TEXT_MISMATCH, HASH_MISMATCH, happy path, all fixtures |
 | test_idempotency.fard | 5 | same-batch and cross-batch duplicate handling |
 | test_pending_resolution.fard | 4 | PENDING -> auto-retry when dependency arrives |
+| test_convergence.fard | 10 | 50-tx convergence, all invariants hard-asserted |
+| test_replay.fard | 10 | empty/single/multi frame replay, text and hash |
 | test_reducer_failure.fard | — | failure suite via harness |
 | test_reducer_edges.fard | — | edge cases via harness |
 | run_all.fard | 12 | fast full suite with hard invariant assertions |
 | test_stress_convergence.fard | 8 | 100-tx and batch-1 convergence (~80s) |
+
+Total: 16 test files, 151+ assertions, 0 failures.
 
 ## Documented Behaviors
 
@@ -89,6 +94,13 @@ Transaction IDs are tracked in processedOps across the lifetime of the machine.
 Submitting the same tx.id twice in the same batch or across batches produces
 DUPLICATE on the second occurrence. State and hash are unaffected.
 
+**validate_projection error paths:**
+
+- PROJECTION_TEXT_MISMATCH: returned when the projection text does not match
+  a full rebuild from the store. data.expected = correct text, data.actual = stale text.
+- PROJECTION_HASH_MISMATCH: returned when text matches but hash does not.
+  data.expected = correct hash, data.actual = stale hash.
+
 ## Store Fixtures
 
 Three fixtures are available in asg.fard for testing:
@@ -99,9 +111,7 @@ Three fixtures are available in asg.fard for testing:
 
 ## Proof of Execution
 
-Latest full-system deterministic test receipt:
-
-    Receipt: sha256:999ef9a (git) / fard_run_digest see out/tests_all/
+Version: v0.1.3 — Phase A complete
 
 Fast suite verified properties:
 
@@ -112,6 +122,8 @@ Fast suite verified properties:
 - Deterministic reducer replay: PASS
 - Semantic failure handling: PASS
 - Reducer edge cases: PASS
+- validate_projection TEXT_MISMATCH: PASS
+- validate_projection HASH_MISMATCH: PASS
 
 Stress suite verified properties:
 
