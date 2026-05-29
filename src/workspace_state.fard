@@ -1,0 +1,107 @@
+import("std/fs") as fs
+import("std/json") as json
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("./core") as core
+import("./asg") as asg
+import("./runtime") as rt
+import("./snapshot") as snap
+import("./journal") as journal
+
+// Workspace state persistence.
+// Serializes runtime snapshot + journal to disk and restores on startup.
+
+fn workspace_dir(baseDir, workspaceId) {
+  str.concat([baseDir, "/", workspaceId])
+}
+
+fn snapshot_file(baseDir, workspaceId) {
+  str.concat([workspace_dir(baseDir, workspaceId), "/snapshot.json"])
+}
+
+fn journal_file(baseDir, workspaceId) {
+  str.concat([workspace_dir(baseDir, workspaceId), "/journal.json"])
+}
+
+fn meta_file(baseDir, workspaceId) {
+  str.concat([workspace_dir(baseDir, workspaceId), "/meta.json"])
+}
+
+fn ensure_dir(baseDir, workspaceId) {
+  let dir = workspace_dir(baseDir, workspaceId) in
+  if fs.exists(dir) then core.ok(dir) else
+  let _ = fs.make_dir(dir) in
+  core.ok(dir)
+}
+
+fn save_runtime(baseDir, workspaceId, fileId, runtime) {
+  let r = ensure_dir(baseDir, workspaceId) in
+  if core.is_err(r) then r else
+  let jrnl = runtime.consumer.journal in
+  let machine = runtime.consumer.machine in
+  let s = snap.make_snapshot(machine, jrnl) in
+  let snap_data = {
+    version: s.version,
+    frameId: rec.getOr(s, "frameId", 0),
+    asgHash: s.asgHash,
+    projectionText: s.projectionText,
+    projectionHash: s.projectionHash,
+    journalHead: s.journalHead,
+    snapshotHash: s.snapshotHash,
+    store: s.store,
+    projection: s.projection
+  } in
+  let journal_data = {
+    workspaceId: jrnl.workspaceId,
+    fileId: jrnl.fileId,
+    entries: jrnl.entries,
+    headHash: jrnl.headHash
+  } in
+  let meta = {
+    workspaceId: workspaceId,
+    fileId: fileId,
+    version: s.version,
+    savedAt: s.snapshotHash
+  } in
+  let _ = fs.write_text(snapshot_file(baseDir, workspaceId), json.encode(snap_data)) in
+  let _ = fs.write_text(journal_file(baseDir, workspaceId), json.encode(journal_data)) in
+  let _ = fs.write_text(meta_file(baseDir, workspaceId), json.encode(meta)) in
+  core.ok({ saved: true, version: s.version, snapshotHash: s.snapshotHash })
+}
+
+fn load_meta(baseDir, workspaceId) {
+  let mf = meta_file(baseDir, workspaceId) in
+  if !fs.exists(mf) then core.err("NO_SAVED_STATE", { workspaceId: workspaceId }) else
+  let raw = fs.read_text(mf) in
+  let meta = json.decode(raw) in
+  if meta == null then core.err("CORRUPT_META", { file: mf }) else
+  core.ok(meta)
+}
+
+fn load_snapshot(baseDir, workspaceId) {
+  let sf = snapshot_file(baseDir, workspaceId) in
+  if !fs.exists(sf) then core.err("NO_SNAPSHOT", { workspaceId: workspaceId }) else
+  let raw = fs.read_text(sf) in
+  let data = json.decode(raw) in
+  if data == null then core.err("CORRUPT_SNAPSHOT", { file: sf }) else
+  let expected = core.digest({ version: data.version, asgHash: data.asgHash, projectionText: data.projectionText, projectionHash: data.projectionHash, journalHead: data.journalHead }) in
+  if data.snapshotHash != expected then
+    core.err("SNAPSHOT_HASH_MISMATCH", { expected: expected, actual: data.snapshotHash }) else
+  core.ok(data)
+}
+
+fn load_journal(baseDir, workspaceId) {
+  let jf = journal_file(baseDir, workspaceId) in
+  if !fs.exists(jf) then core.err("NO_JOURNAL", { workspaceId: workspaceId }) else
+  let raw = fs.read_text(jf) in
+  let data = json.decode(raw) in
+  if data == null then core.err("CORRUPT_JOURNAL", { file: jf }) else
+  core.ok({ workspaceId: data.workspaceId, fileId: data.fileId, entries: data.entries, headHash: data.headHash })
+}
+
+fn has_saved_state(baseDir, workspaceId) {
+  fs.exists(meta_file(baseDir, workspaceId))
+}
+
+export { workspace_dir, snapshot_file, journal_file, meta_file, ensure_dir, save_runtime, load_meta, load_snapshot, load_journal, has_saved_state }

@@ -1,0 +1,72 @@
+import("../src/asg") as asg
+import("../src/transactions") as txs
+import("../src/runtime") as rt
+import("../src/snapshot") as snap
+import("../src/journal") as journal
+import("../src/workspace_state") as ws_state
+import("../src/core") as core
+import("std/list") as list
+import("std/fs") as fs
+
+let base = "data/test_ws_state"
+let store = asg.sample_store()
+let runtime0 = rt.init_runtime("ws", "main.fard", store)?
+
+let tx1 = txs.tx("tx1", "ws", [], [txs.pre_exists("fn_main")], txs.op_rename("fn_main", "main_v1"), 1, "r")
+let tx2 = txs.tx("tx2", "ws", [], [txs.pre_exists("stmt_1")], txs.op_set("stmt_1", "value", "42"), 2, "r")
+
+let r1 = rt.submit_tx(runtime0, tx1)?
+let r2 = rt.submit_tx(r1.runtime, tx2)?
+let runtime_after = r2.runtime
+let server_text = rt.server_text(runtime_after)
+
+// has_saved_state false before save
+let a1 = core.assert_equal("no saved state before save", ws_state.has_saved_state(base, "ws"), false)
+
+// save_runtime
+let saved = ws_state.save_runtime(base, "ws", "main.fard", runtime_after)?
+let a2 = core.assert_equal("save returns ok", saved.saved, true)
+let a3 = core.assert_equal("save version correct", saved.version, runtime_after.consumer.machine.reducer.globalVersion)
+
+// has_saved_state true after save
+let a4 = core.assert_equal("has saved state after save", ws_state.has_saved_state(base, "ws"), true)
+
+// load_meta
+let meta = ws_state.load_meta(base, "ws")?
+let a5 = core.assert_equal("meta workspaceId", meta.workspaceId, "ws")
+let a6 = core.assert_equal("meta fileId", meta.fileId, "main.fard")
+let a7 = core.assert_equal("meta version", meta.version, saved.version)
+
+// load_snapshot
+let snap_data = ws_state.load_snapshot(base, "ws")?
+let a8 = core.assert_equal("snapshot version", snap_data.version, saved.version)
+let a9 = core.assert_equal("snapshot projectionText", snap_data.projectionText, server_text)
+let a10 = core.assert_equal("snapshot hash verifies", snap_data.snapshotHash, saved.snapshotHash)
+
+// load_journal
+let jrnl_data = ws_state.load_journal(base, "ws")?
+let a11 = core.assert_equal("journal workspaceId", jrnl_data.workspaceId, "ws")
+let a12 = core.assert_equal("journal headHash matches", jrnl_data.headHash, runtime_after.consumer.journal.headHash)
+let a13 = core.assert_equal("journal entry count", list.len(jrnl_data.entries), list.len(runtime_after.consumer.journal.entries))
+
+// corruption detection: tamper snapshot hash
+let snap_file = ws_state.snapshot_file(base, "ws")
+import("std/json") as json
+import("std/rec") as rec
+let raw = fs.read_text(snap_file)
+let tampered = rec.set(json.decode(raw), "snapshotHash", "sha256:0000000000000000000000000000000000000000000000000000000000000000")
+let _ = fs.write_text(snap_file, json.encode(tampered))
+let corrupt = ws_state.load_snapshot(base, "ws")
+let a14 = core.assert_equal("corrupt snapshot detected", corrupt.t, "err")
+let a15 = core.assert_equal("corrupt snapshot error code", corrupt.code, "SNAPSHOT_HASH_MISMATCH")
+
+// missing workspace
+let missing = ws_state.load_meta(base, "ws_missing")
+let a16 = core.assert_equal("missing workspace is err", missing.t, "err")
+let a17 = core.assert_equal("missing workspace code", missing.code, "NO_SAVED_STATE")
+
+// save determinism: same runtime saves same snapshotHash
+let saved2 = ws_state.save_runtime(base, "ws2", "main.fard", runtime_after)?
+let a18 = core.assert_equal("save deterministic hash", saved.snapshotHash, saved2.snapshotHash)
+
+core.ok(core.test_summary("workspace_state", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18]))

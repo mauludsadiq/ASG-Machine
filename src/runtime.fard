@@ -60,7 +60,8 @@ fn submit_many(runtime, txs_list) {
 
 fn poll_frames(runtime, sinceFrameId) {
   let entries = journal.frames_since(runtime.consumer.journal, sinceFrameId) in
-  let headFrameId = if list.len(runtime.consumer.machine.frames) == 0 then 0 else list.last(runtime.consumer.machine.frames).frameId in
+  let jentries = runtime.consumer.journal.entries in
+  let headFrameId = if list.len(jentries) == 0 then 0 else list.last(jentries).frameId in
   core.ok({ frames: entries, count: list.len(entries), headFrameId: headFrameId })
 }
 
