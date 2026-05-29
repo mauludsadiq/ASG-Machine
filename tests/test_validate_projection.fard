@@ -1,0 +1,52 @@
+import("../src/asg") as asg
+import("../src/projection") as projection
+import("../src/core") as core
+import("std/rec") as rec
+
+let store = asg.sample_store()
+let p = projection.build_projection(store)?
+
+// Happy path
+let v1 = projection.validate_projection(store, p)
+let a1 = core.assert_equal("validate ok on fresh projection", v1.t, "ok")
+
+// PROJECTION_TEXT_MISMATCH: tamper with projection text
+let tampered_text = { ...p, text: "fn totally_wrong() {}
+" }
+let v2 = projection.validate_projection(store, tampered_text)
+let a2 = core.assert_equal("text mismatch is err", v2.t, "err")
+let a3 = core.assert_equal("text mismatch error code", v2.code, "PROJECTION_TEXT_MISMATCH")
+let a4 = core.assert_equal("text mismatch reports expected", v2.data.expected, p.text)
+let a5 = core.assert_equal("text mismatch reports actual", v2.data.actual, tampered_text.text)
+
+// PROJECTION_HASH_MISMATCH: correct text but wrong hash
+let tampered_hash = { ...p, hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+let v3 = projection.validate_projection(store, tampered_hash)
+let a6 = core.assert_equal("hash mismatch is err", v3.t, "err")
+let a7 = core.assert_equal("hash mismatch error code", v3.code, "PROJECTION_HASH_MISMATCH")
+let a8 = core.assert_equal("hash mismatch reports expected", v3.data.expected, p.hash)
+let a9 = core.assert_equal("hash mismatch reports actual", v3.data.actual, tampered_hash.hash)
+
+// Stale projection after mutation hits text mismatch
+let store2 = asg.rename_node(store, "fn_main", "renamed")?
+let v4 = projection.validate_projection(store2, p)
+let a10 = core.assert_equal("stale projection after mutation is err", v4.t, "err")
+let a11 = core.assert_equal("stale projection error code", v4.code, "PROJECTION_TEXT_MISMATCH")
+
+// validate passes on freshly rebuilt projection after mutation
+let p2 = projection.build_projection(store2)?
+let v5 = projection.validate_projection(store2, p2)
+let a12 = core.assert_equal("validate ok on rebuilt projection", v5.t, "ok")
+
+// deep_store and wide_store validate cleanly
+let deep = asg.deep_store()
+let pd = projection.build_projection(deep)?
+let vd = projection.validate_projection(deep, pd)
+let a13 = core.assert_equal("deep_store validates ok", vd.t, "ok")
+
+let wide = asg.wide_store()
+let pw = projection.build_projection(wide)?
+let vw = projection.validate_projection(wide, pw)
+let a14 = core.assert_equal("wide_store validates ok", vw.t, "ok")
+
+core.ok(core.test_summary("validate_projection", [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14]))
